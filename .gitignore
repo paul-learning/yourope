@@ -1,1 +1,6 @@
 .env
+# SQLite
+game.db
+*.db
+*.sqlite
+*.sqlite3

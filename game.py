@@ -1,33 +1,25 @@
-import streamlit as st
-from mistralai import Mistral
-import sqlite3
-from dotenv import load_dotenv
 import os
-import json
 import re
 import json
+import sqlite3
+from pathlib import Path
 
-def init_game_state():
-    st.session_state.game_started = True
-    st.session_state.round = 1
-    st.session_state.eu_cohesion = 75
+import streamlit as st
+from dotenv import load_dotenv
+from mistralai import Mistral
 
-    st.session_state.countries = {
-        "Deutschland": {"wirtschaft": 95, "stabilität": 90, "militär": 70},
-        "Frankreich": {"wirtschaft": 90, "stabilität": 85, "militär": 75},
-        "Dänemark": {"wirtschaft": 85, "stabilität": 90, "militär": 60},
-        "Polen": {"wirtschaft": 80, "stabilität": 80, "militär": 80},
-        "Ungarn": {"wirtschaft": 70, "stabilität": 75, "militär": 65},
-    }
-    
 
-    st.session_state.actions = None
-    st.session_state.selected_actions = {}
-    st.session_state.history = []
+# ----------------------------
+# Helpers: dotenv, JSON parsing
+# ----------------------------
+def load_env():
+    # Lädt .env aus dem gleichen Ordner wie game.py (robust für streamlit run von überall)
+    env_path = Path(__file__).with_name(".env")
+    load_dotenv(env_path)
 
 
 def content_to_text(content) -> str:
-    # content kann str sein, oder eine Liste von Parts (je nach SDK)
+    """mistralai SDK kann content als str oder Liste von Parts liefern."""
     if content is None:
         return ""
     if isinstance(content, str):
@@ -35,170 +27,424 @@ def content_to_text(content) -> str:
     if isinstance(content, list):
         parts = []
         for p in content:
-            # SDK-Parts haben oft .text
             t = getattr(p, "text", None)
             if t:
                 parts.append(t)
             elif isinstance(p, str):
                 parts.append(p)
         return "".join(parts)
-    # Fallback
     return str(content)
 
+
 def parse_json_maybe(text: str):
+    """Parst JSON auch dann, wenn ```json ... ``` oder Text drumherum vorkommt."""
     s = (text or "").strip()
     if not s:
         raise ValueError("Leere Antwort vom Modell (kein JSON erhalten).")
 
-    # Markdown-Codefences entfernen
+    # Codefences entfernen
     s = re.sub(r"^```(?:json)?\s*", "", s, flags=re.IGNORECASE)
     s = re.sub(r"\s*```$", "", s)
 
-    # Erst direkt parsen
+    # Direkt versuchen
     try:
         return json.loads(s)
     except json.JSONDecodeError:
         pass
 
-    # Sonst: erstes JSON-Objekt/Array aus dem Text ziehen
+    # Erstes JSON-Objekt/Array extrahieren
     m = re.search(r"(\{.*\}|\[.*\])", s, flags=re.DOTALL)
     if not m:
-        raise ValueError(f"Kein JSON in der Modellantwort gefunden. Anfang: {s[:200]!r}")
+        raise ValueError(f"Kein JSON gefunden. Anfang der Antwort: {s[:200]!r}")
     return json.loads(m.group(1))
 
 
-# API-Client initialisieren
+# ----------------------------
+# DB setup / access
+# ----------------------------
+DB_PATH = "game.db"
 
-load_dotenv()
-api_key = os.getenv("MISTRAL_API_KEY")
-client = Mistral(api_key=api_key)
+GERMANY_DEFAULT = {
+    "military": 70,
+    "stability": 90,
+    "economy": 95,
+    "diplomatic_influence": 80,
+    "public_approval": 75,
+    "ambition": "AfD schwächen, EU führen, Energiewende vorantreiben",
+}
+
+EU_DEFAULT = {
+    "cohesion": 75,
+    "global_context": "Russland droht mit Gaskürzungen. USA drohen mit Übernahme Grönlands. China liebäugelt mit Invasion Taiwans.",
+}
 
 
-# Datenbankverbindung
-conn = sqlite3.connect("game.db")
-cursor = conn.cursor()
+def get_conn():
+    # check_same_thread=False ist bei Streamlit hilfreich (reruns)
+    return sqlite3.connect(DB_PATH, check_same_thread=False)
 
-# UI-Titel
+
+def ensure_schema(conn: sqlite3.Connection):
+    cur = conn.cursor()
+
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS countries (
+        name TEXT PRIMARY KEY,
+        military INTEGER NOT NULL,
+        stability INTEGER NOT NULL,
+        economy INTEGER NOT NULL,
+        diplomatic_influence INTEGER NOT NULL,
+        public_approval INTEGER NOT NULL,
+        ambition TEXT NOT NULL
+    )
+    """)
+
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS turn_history (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        ts DATETIME DEFAULT CURRENT_TIMESTAMP,
+        country TEXT NOT NULL,
+        round INTEGER NOT NULL,
+        action_public TEXT NOT NULL,
+        global_context TEXT NOT NULL,
+        delta_military INTEGER NOT NULL,
+        delta_stability INTEGER NOT NULL,
+        delta_economy INTEGER NOT NULL,
+        delta_diplomatic_influence INTEGER NOT NULL,
+        delta_public_approval INTEGER NOT NULL
+    )
+    """)
+
+    conn.commit()
+
+
+def seed_germany_if_missing(conn: sqlite3.Connection):
+    cur = conn.cursor()
+    cur.execute("SELECT name FROM countries WHERE name = ?", ("Germany",))
+    if cur.fetchone() is None:
+        cur.execute("""
+        INSERT INTO countries (name, military, stability, economy, diplomatic_influence, public_approval, ambition)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        """, (
+            "Germany",
+            GERMANY_DEFAULT["military"],
+            GERMANY_DEFAULT["stability"],
+            GERMANY_DEFAULT["economy"],
+            GERMANY_DEFAULT["diplomatic_influence"],
+            GERMANY_DEFAULT["public_approval"],
+            GERMANY_DEFAULT["ambition"],
+        ))
+        conn.commit()
+
+
+def load_germany_metrics(conn: sqlite3.Connection):
+    cur = conn.cursor()
+    cur.execute("SELECT name, military, stability, economy, diplomatic_influence, public_approval, ambition FROM countries WHERE name = ?", ("Germany",))
+    row = cur.fetchone()
+    if not row:
+        return None
+    return {
+        "name": row[0],
+        "military": row[1],
+        "stability": row[2],
+        "economy": row[3],
+        "diplomatic_influence": row[4],
+        "public_approval": row[5],
+        "ambition": row[6],
+    }
+
+
+def update_germany_metrics(conn: sqlite3.Connection, deltas: dict):
+    cur = conn.cursor()
+    cur.execute("""
+    UPDATE countries SET
+        military = military + ?,
+        stability = stability + ?,
+        economy = economy + ?,
+        diplomatic_influence = diplomatic_influence + ?,
+        public_approval = public_approval + ?
+    WHERE name = ?
+    """, (
+        int(deltas.get("militär", 0)),
+        int(deltas.get("stabilität", 0)),
+        int(deltas.get("wirtschaft", 0)),
+        int(deltas.get("diplomatie", 0)),
+        int(deltas.get("öffentliche_zustimmung", 0)),
+        "Germany",
+    ))
+    conn.commit()
+
+
+def reset_db_to_start(conn: sqlite3.Connection):
+    cur = conn.cursor()
+    # metrics zurücksetzen
+    cur.execute("""
+    UPDATE countries SET
+        military = ?,
+        stability = ?,
+        economy = ?,
+        diplomatic_influence = ?,
+        public_approval = ?,
+        ambition = ?
+    WHERE name = ?
+    """, (
+        GERMANY_DEFAULT["military"],
+        GERMANY_DEFAULT["stability"],
+        GERMANY_DEFAULT["economy"],
+        GERMANY_DEFAULT["diplomatic_influence"],
+        GERMANY_DEFAULT["public_approval"],
+        GERMANY_DEFAULT["ambition"],
+        "Germany",
+    ))
+
+    # history leeren
+    cur.execute("DELETE FROM turn_history WHERE country = ?", ("Germany",))
+    conn.commit()
+
+
+# ----------------------------
+# Game state
+# ----------------------------
+def init_game_state():
+    st.session_state.game = {
+        "round": 1,
+        "eu": {
+            "cohesion": EU_DEFAULT["cohesion"],
+            "global_context": EU_DEFAULT["global_context"],
+        },
+        "actions": None,          # zuletzt generierte Aktionen (dict)
+        "choice_key": None,       # "aggressiv"/"moderate"/"passiv"
+    }
+
+
+def reset_game(conn: sqlite3.Connection):
+    init_game_state()
+    reset_db_to_start(conn)
+
+
+# ----------------------------
+# App start
+# ----------------------------
+st.set_page_config(page_title="EU Geopolitik-Prototyp", layout="centered")
 st.title("EU Geopolitik-Prototyp (Deutschland)")
+
+load_env()
+api_key = (os.getenv("MISTRAL_API_KEY") or "").strip()
+
+conn = get_conn()
+ensure_schema(conn)
+seed_germany_if_missing(conn)
+
+if "game" not in st.session_state:
+    init_game_state()
+
+game = st.session_state.game
+
+# Sidebar controls
+st.sidebar.header("Steuerung")
+
+if st.sidebar.button("🔄 Spiel zurücksetzen (alles auf Anfang)"):
+    reset_game(conn)
+    st.rerun()
+
+st.sidebar.write(f"Runde: **{game['round']}**")
+st.sidebar.write(f"EU-Kohäsion: **{game['eu']['cohesion']}%**")
+st.sidebar.caption(game["eu"]["global_context"])
+
 st.write("---")
 
-# Aktuelle Metriken laden
-cursor.execute("SELECT * FROM countries WHERE name = 'Germany'")
-metrics = cursor.fetchone()
+# Key check
+if not api_key:
+    st.error("MISTRAL_API_KEY fehlt. Lege eine .env neben game.py an: MISTRAL_API_KEY=... ")
+    st.stop()
 
-# Metriken anzeigen
-col1, col2 = st.columns(2)
-with col1:
-    st.subheader("Aktuelle Metriken")
-    st.write(f"- Militär: {metrics[1]}")
-    st.write(f"- Stabilität: {metrics[2]}")
-    st.write(f"- Wirtschaft: {metrics[3]}")
-with col2:
-    st.write(f"- Diplomatischer Einfluss: {metrics[4]}")
-    st.write(f"- Öffentliche Zustimmung: {metrics[5]}")
-    st.write(f"- Ambition: {metrics[6]}")
+client = Mistral(api_key=api_key)
 
-# AI-Aktionen generieren
+# Load metrics
+metrics = load_germany_metrics(conn)
+if not metrics:
+    st.error("Konnte Germany nicht aus der DB laden.")
+    st.stop()
+
+# Display metrics
+st.subheader("Aktuelle Metriken (Deutschland)")
+c1, c2, c3 = st.columns(3)
+c1.metric("Wirtschaft", metrics["economy"])
+c2.metric("Stabilität", metrics["stability"])
+c3.metric("Militär", metrics["military"])
+
+c4, c5 = st.columns(2)
+c4.metric("Diplomatie", metrics["diplomatic_influence"])
+c5.metric("Öffentliche Zustimmung", metrics["public_approval"])
+
+with st.expander("Ambition"):
+    st.write(metrics["ambition"])
+
+st.write("---")
+
+
+# ----------------------------
+# Generate actions
+# ----------------------------
+st.subheader("Runde: Öffentliche Aktion")
+
 if st.button("Aktionen generieren"):
     with st.spinner("AI generiert Aktionen..."):
         prompt = f"""
-        Du bist ein AI-Agent in einem EU-Geopolitik-Spiel.
-        Generiere **drei öffentliche Aktionen** für Deutschland basierend auf diesem Kontext:
+Du bist ein Spielleiter in einem EU-Geopolitik-Spiel.
+Erzeuge drei öffentliche Aktionsoptionen für Deutschland (aggressiv, moderate, passiv).
 
-        --- Kontext ---
-        - Aktuelle Metriken: Militär={metrics[1]}, Stabilität={metrics[2]}, Wirtschaft={metrics[3]}, Diplomatischer Einfluss={metrics[4]}, Öffentliche Zustimmung={metrics[5]}.
-        - Ambition: {metrics[6]}.
-        - Letzte Aktion: Keine (erste Runde).
-        - Globaler Kontext: EU-Kohäsion=75%, Russland droht mit Gaskürzungen.
+Kontext:
+- Deutschland Metriken: Militär={metrics["military"]}, Stabilität={metrics["stability"]}, Wirtschaft={metrics["economy"]}, Diplomatie={metrics["diplomatic_influence"]}, Öffentliche Zustimmung={metrics["public_approval"]}.
+- Ambition: {metrics["ambition"]}.
+- EU: Kohäsion={game["eu"]["cohesion"]}%.
+- Globaler Kontext: {game["eu"]["global_context"]}
 
-        --- Aufgaben ---
-        1. Gib **drei Aktionen** zurück: eine aggressive, eine moderate, eine passive.
-        2. Formatiere die Antwort als JSON:
-           {{
-             "aggressiv": {{"aktion": "Beschreibung", "folgen": {{"deutschland": {{"wirtschaft": X, "stabilität": Y}}, "eu": {{"kohäsion": Z}}}}}},
-             "moderate": {{...}},
-             "passiv": {{...}}
-           }}
-        3. Jede Aktion sollte realistische Auswirkungen auf die Metriken haben.
-        4. Antworte ausschließlich mit einem gültigen JSON-Objekt. Keine Erklärungen, kein Markdown.
-        """
+Format:
+Gib NUR gültiges JSON zurück (kein Markdown, keine Erklärungen).
+Schema (genau so):
+{{
+  "aggressiv": {{
+    "aktion": "...",
+    "folgen": {{
+      "deutschland": {{"militär": 0, "stabilität": 0, "wirtschaft": 0, "diplomatie": 0, "öffentliche_zustimmung": 0}},
+      "eu": {{"kohäsion": 0}},
+      "global_context": "kurzer Satz zur Reaktion"
+    }}
+  }},
+  "moderate": {{ ... }},
+  "passiv": {{ ... }}
+}}
+
+Regeln:
+- Folgen sind kleine, realistische Ganzzahlen (z.B. -10 bis +10).
+- global_context ist ein kurzer Satz (max. 1 Zeile).
+"""
+
         response = client.chat.complete(
             model="mistral-small",
-            messages=[{"role": "user", "content": prompt}],
-            max_tokens=900
+            messages=[
+                {"role": "system", "content": "Antworte ausschließlich mit gültigem JSON. Kein Markdown."},
+                {"role": "user", "content": prompt},
+            ],
+            # wenn deine SDK-Version max_tokens nicht kennt, einfach entfernen
+            max_tokens=900,
+            temperature=0.9,
+            top_p=0.95,
         )
+
         raw = content_to_text(response.choices[0].message.content)
 
-        # Debug-Hilfe (kannst du später entfernen)
-        st.write("RAW (first 500 chars):", raw[:500])
-
         try:
-            st.session_state.actions = parse_json_maybe(raw)
+            actions_obj = parse_json_maybe(raw)
         except Exception as e:
-            st.error(f"Konnte JSON nicht parsen: {e}")
+            st.error(f"JSON konnte nicht geparst werden: {e}")
+            st.text("RAW (erste 800 Zeichen):")
+            st.code(raw[:800])
             st.stop()
 
-        st.json(st.session_state.actions)
+        # Minimal-Validierung
+        for k in ("aggressiv", "moderate", "passiv"):
+            if k not in actions_obj:
+                st.error(f"Fehlender Key im JSON: {k}")
+                st.json(actions_obj)
+                st.stop()
+
+        game["actions"] = actions_obj
+        game["choice_key"] = None
+        st.success("Aktionen generiert.")
 
 
-# Aktionen auswählen (wenn generiert)
-if "actions" in st.session_state:
-    st.subheader("Wähle eine öffentliche Aktion:")
-    choice = st.radio(
+# ----------------------------
+# Choose + apply action
+# ----------------------------
+if game.get("actions"):
+    actions = game["actions"]
+
+    st.subheader("Wähle eine Aktion")
+    options = {
+        "aggressiv": actions["aggressiv"]["aktion"],
+        "moderate": actions["moderate"]["aktion"],
+        "passiv": actions["passiv"]["aktion"],
+    }
+
+    selected_label = st.radio(
         "Aktion auswählen:",
-        [
-            st.session_state.actions["aggressiv"]["aktion"],
-            st.session_state.actions["moderate"]["aktion"],
-            st.session_state.actions["passiv"]["aktion"]
-        ]
+        [options["aggressiv"], options["moderate"], options["passiv"]],
+        index=1  # default: moderate
     )
 
-    if st.button("Runde abschließen"):
-        # Metriken aus der gewählten Aktion extrahieren
-        if choice == st.session_state.actions["aggressiv"]["aktion"]:
-            new_metrics = st.session_state.actions["aggressiv"]["folgen"]["deutschland"]
-            global_context = "EU-Kohäsion: 80%, Russland erhöht Militär um 5 (Reaktion auf Sanktionen)."
-        elif choice == st.session_state.actions["moderate"]["aktion"]:
-            new_metrics = st.session_state.actions["moderate"]["folgen"]["deutschland"]
-            global_context = "EU-Kohäsion: 75%, Russland bleibt neutral."
-        else:
-            new_metrics = st.session_state.actions["passiv"]["folgen"]["deutschland"]
-            global_context = "EU-Kohäsion: 70%, Russland ignoriert Deutschland."
+    # map back to key
+    chosen_key = next(k for k, v in options.items() if v == selected_label)
 
-        # Neue Metriken in turn_history speichern
-        cursor.execute("""
-            INSERT INTO turn_history (
-                country, military, stability, economy, diplomatic_influence, public_approval,
-                action_public, action_private, action_internal, global_context
-            )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    if st.button("Runde abschließen"):
+        chosen = actions[chosen_key]
+        folgen = chosen.get("folgen", {})
+        de_delta = folgen.get("deutschland", {}) or {}
+        eu_delta = folgen.get("eu", {}) or {}
+        new_global_context = folgen.get("global_context") or game["eu"]["global_context"]
+
+        # DB update
+        update_germany_metrics(conn, de_delta)
+
+        # EU state update (session)
+        game["eu"]["cohesion"] = int(game["eu"]["cohesion"]) + int(eu_delta.get("kohäsion", 0))
+        game["eu"]["global_context"] = str(new_global_context)
+
+        # History (DB)
+        cur = conn.cursor()
+        cur.execute("""
+        INSERT INTO turn_history (
+            country, round, action_public, global_context,
+            delta_military, delta_stability, delta_economy, delta_diplomatic_influence, delta_public_approval
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             "Germany",
-            metrics[1] + new_metrics.get("wirtschaft", 0),
-            metrics[2] + new_metrics.get("stabilität", 0),
-            metrics[3] + new_metrics.get("wirtschaft", 0),  # Wirtschaft = economy
-            metrics[4] + new_metrics.get("diplomatie", 0),
-            metrics[5] + new_metrics.get("öffentliche_zustimmung", 0),
-            choice,  # action_public
-            "Keine",  # action_private (vereinfacht)
-            "Keine",  # action_internal (vereinfacht)
-            global_context
+            int(game["round"]),
+            str(chosen.get("aktion", "")),
+            str(game["eu"]["global_context"]),
+            int(de_delta.get("militär", 0)),
+            int(de_delta.get("stabilität", 0)),
+            int(de_delta.get("wirtschaft", 0)),
+            int(de_delta.get("diplomatie", 0)),
+            int(de_delta.get("öffentliche_zustimmung", 0)),
         ))
-
-        # Aktuelle Metriken in countries aktualisieren
-        cursor.execute(f"""
-            UPDATE countries SET
-            military = {metrics[1] + new_metrics.get("militär", 0)},
-            stability = {metrics[2] + new_metrics.get("stabilität", 0)},
-            economy = {metrics[3] + new_metrics.get("wirtschaft", 0)},
-            diplomatic_influence = {metrics[4] + new_metrics.get("diplomatie", 0)},
-            public_approval = {metrics[5] + new_metrics.get("öffentliche_zustimmung", 0)}
-            WHERE name = 'Germany'
-        """)
-
         conn.commit()
-        st.success("Runde abgeschlossen! Neue Metriken gespeichert.")
-        st.rerun()  # UI neu laden
 
-# Datenbank schließen (wichtig!)
+        # Next round
+        game["round"] += 1
+        game["actions"] = None
+        game["choice_key"] = None
+
+        st.success("Runde abgeschlossen! Neue Metriken gespeichert.")
+        st.rerun()
+
+
+# ----------------------------
+# Show history (optional)
+# ----------------------------
+with st.expander("Turn-History (Debug)"):
+    cur = conn.cursor()
+    cur.execute("""
+    SELECT round, action_public, delta_military, delta_stability, delta_economy, delta_diplomatic_influence, delta_public_approval, global_context
+    FROM turn_history
+    WHERE country = ?
+    ORDER BY id DESC
+    LIMIT 15
+    """, ("Germany",))
+    rows = cur.fetchall()
+    if not rows:
+        st.write("Noch keine Runden gespielt.")
+    else:
+        for r in rows:
+            st.markdown(
+                f"""
+**Runde {r[0]}**  
+Aktion: {r[1]}  
+Δ Militär {r[2]}, Δ Stabilität {r[3]}, Δ Wirtschaft {r[4]}, Δ Diplomatie {r[5]}, Δ Zustimmung {r[6]}  
+Kontext: {r[7]}
+"""
+            )
+
 conn.close()
