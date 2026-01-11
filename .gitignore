@@ -4,3 +4,10 @@ game.db
 *.db
 *.sqlite
 *.sqlite3
+
+# python
+__pycache__/
+*.pyc
+
+# streamlit
+.streamlit/
