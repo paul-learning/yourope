@@ -221,14 +221,24 @@ game = st.session_state.game
 # Sidebar controls
 st.sidebar.header("Steuerung")
 
-# Land wählen
-country = st.sidebar.selectbox(
+# Land wählen (Dropdown zeigt display_name, intern bleibt Key wie "Germany")
+country_keys = list(COUNTRY_DEFS.keys())
+country_labels = [COUNTRY_DEFS[k]["display_name"] for k in country_keys]
+
+# aktuellen Index über den internen Key bestimmen
+current_idx = country_keys.index(game["current_country"]) if game["current_country"] in COUNTRY_DEFS else 0
+
+selected_label = st.sidebar.selectbox(
     "Land auswählen",
-    list(COUNTRY_DEFS.keys()),
-    index=list(COUNTRY_DEFS.keys()).index(game["current_country"]) if game["current_country"] in COUNTRY_DEFS else 0,
+    country_labels,
+    index=current_idx,
 )
+
+# zurück mappen auf internen Key
+country = country_keys[country_labels.index(selected_label)]
 game["current_country"] = country
 country_display = COUNTRY_DEFS[country]["display_name"]
+
 
 st.sidebar.write(f"Runde: **{game['round']}**")
 st.sidebar.write(f"EU-Kohäsion: **{game['eu']['cohesion']}%**")
