@@ -1,21 +1,19 @@
 # db.py
 import sqlite3
-from typing import Dict, Any, List, Tuple
-
+from typing import Dict, Any, List, Tuple, Optional
 from utils import clamp_int
-
 
 DB_PATH = "game.db"
 
 
 def get_conn() -> sqlite3.Connection:
-    # check_same_thread=False ist bei Streamlit hilfreich (reruns)
     return sqlite3.connect(DB_PATH, check_same_thread=False)
 
 
 def ensure_schema(conn: sqlite3.Connection) -> None:
     cur = conn.cursor()
 
+    # Länder (wie vorher)
     cur.execute("""
     CREATE TABLE IF NOT EXISTS countries (
         name TEXT PRIMARY KEY,
@@ -28,6 +26,7 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
     )
     """)
 
+    # Historie (wie vorher)
     cur.execute("""
     CREATE TABLE IF NOT EXISTS turn_history (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -44,6 +43,55 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
     )
     """)
 
+    # EU State (persistiert! wichtig bei Multi-User)
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS eu_state (
+        id INTEGER PRIMARY KEY CHECK (id = 1),
+        cohesion INTEGER NOT NULL,
+        global_context TEXT NOT NULL
+    )
+    """)
+
+    # Meta / Runde / Phase (persistiert! wichtig bei Multi-User)
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS game_meta (
+        id INTEGER PRIMARY KEY CHECK (id = 1),
+        round INTEGER NOT NULL,
+        phase TEXT NOT NULL
+    )
+    """)
+
+    # Aktionen pro Runde/Land (vom GM generiert & veröffentlicht)
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS round_actions (
+        round INTEGER NOT NULL,
+        country TEXT NOT NULL,
+        variant TEXT NOT NULL,          -- aggressiv/moderate/passiv
+        action_text TEXT NOT NULL,
+        PRIMARY KEY (round, country, variant)
+    )
+    """)
+
+    # Player Locks (Auswahl pro Runde/Land)
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS round_locks (
+        round INTEGER NOT NULL,
+        country TEXT NOT NULL,
+        locked_variant TEXT NOT NULL,   -- aggressiv/moderate/passiv
+        locked_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY (round, country)
+    )
+    """)
+
+    conn.commit()
+
+    # Seed: eu_state & game_meta
+    cur.execute("SELECT 1 FROM eu_state WHERE id = 1")
+    if cur.fetchone() is None:
+        cur.execute("INSERT INTO eu_state (id, cohesion, global_context) VALUES (1, 75, '')")
+    cur.execute("SELECT 1 FROM game_meta WHERE id = 1")
+    if cur.fetchone() is None:
+        cur.execute("INSERT INTO game_meta (id, round, phase) VALUES (1, 1, 'setup')")
     conn.commit()
 
 
@@ -96,7 +144,42 @@ def reset_all_countries(conn: sqlite3.Connection, country_defs: Dict[str, Dict[s
         reset_country_to_defaults(conn, country, defs)
 
 
-def load_country_metrics(conn: sqlite3.Connection, country: str) -> Dict[str, Any] | None:
+# -----------------------
+# EU + META
+# -----------------------
+def get_eu_state(conn: sqlite3.Connection) -> Dict[str, Any]:
+    cur = conn.cursor()
+    cur.execute("SELECT cohesion, global_context FROM eu_state WHERE id = 1")
+    cohesion, global_context = cur.fetchone()
+    return {"cohesion": int(cohesion), "global_context": str(global_context)}
+
+
+def set_eu_state(conn: sqlite3.Connection, cohesion: int, global_context: str) -> None:
+    cur = conn.cursor()
+    cur.execute(
+        "UPDATE eu_state SET cohesion = ?, global_context = ? WHERE id = 1",
+        (clamp_int(cohesion, 0, 100), str(global_context)),
+    )
+    conn.commit()
+
+
+def get_game_meta(conn: sqlite3.Connection) -> Dict[str, Any]:
+    cur = conn.cursor()
+    cur.execute("SELECT round, phase FROM game_meta WHERE id = 1")
+    r, p = cur.fetchone()
+    return {"round": int(r), "phase": str(p)}
+
+
+def set_game_meta(conn: sqlite3.Connection, round_no: int, phase: str) -> None:
+    cur = conn.cursor()
+    cur.execute("UPDATE game_meta SET round = ?, phase = ? WHERE id = 1", (int(round_no), str(phase)))
+    conn.commit()
+
+
+# -----------------------
+# Countries CRUD
+# -----------------------
+def load_country_metrics(conn: sqlite3.Connection, country: str) -> Optional[Dict[str, Any]]:
     cur = conn.cursor()
     cur.execute("""
         SELECT name, military, stability, economy, diplomatic_influence, public_approval, ambition
@@ -113,13 +196,22 @@ def load_country_metrics(conn: sqlite3.Connection, country: str) -> Dict[str, An
         "economy": int(row[3]),
         "diplomatic_influence": int(row[4]),
         "public_approval": int(row[5]),
-        "ambition": row[6],
+        "ambition": str(row[6]),
     }
 
 
-def update_country_metrics(conn: sqlite3.Connection, country: str, deltas: Dict[str, Any]) -> None:
+def load_all_country_metrics(conn: sqlite3.Connection, countries: List[str]) -> Dict[str, Dict[str, Any]]:
+    out: Dict[str, Dict[str, Any]] = {}
+    for c in countries:
+        m = load_country_metrics(conn, c)
+        if m:
+            out[c] = m
+    return out
+
+
+def apply_country_deltas(conn: sqlite3.Connection, country: str, deltas: Dict[str, Any]) -> None:
     """
-    Erwartet Keys wie im Prompt:
+    Erwartet Keys:
     militär, stabilität, wirtschaft, diplomatie, öffentliche_zustimmung
     """
     dm = int(deltas.get("militär", 0))
@@ -140,7 +232,7 @@ def update_country_metrics(conn: sqlite3.Connection, country: str, deltas: Dict[
     """, (dm, ds, de, dd, dp, country))
     conn.commit()
 
-    # clamp auf 0..100 (nachträglich, simpel & robust)
+    # clamp 0..100
     cur.execute("""
         SELECT military, stability, economy, diplomatic_influence, public_approval
         FROM countries WHERE name = ?
@@ -148,15 +240,9 @@ def update_country_metrics(conn: sqlite3.Connection, country: str, deltas: Dict[
     m, s, e, d, p = cur.fetchone()
     cur.execute("""
         UPDATE countries SET
-            military = ?,
-            stability = ?,
-            economy = ?,
-            diplomatic_influence = ?,
-            public_approval = ?
+            military = ?, stability = ?, economy = ?, diplomatic_influence = ?, public_approval = ?
         WHERE name = ?
-    """, (
-        clamp_int(m), clamp_int(s), clamp_int(e), clamp_int(d), clamp_int(p), country
-    ))
+    """, (clamp_int(m), clamp_int(s), clamp_int(e), clamp_int(d), clamp_int(p), country))
     conn.commit()
 
 
@@ -167,7 +253,7 @@ def insert_turn_history(
     round_no: int,
     action_public: str,
     global_context: str,
-    deltas: Dict[str, Any]
+    deltas: Dict[str, Any],
 ) -> None:
     cur = conn.cursor()
     cur.execute("""
@@ -190,11 +276,7 @@ def insert_turn_history(
     conn.commit()
 
 
-def load_recent_history(
-    conn: sqlite3.Connection,
-    country: str,
-    limit: int = 12
-) -> List[Tuple]:
+def load_recent_history(conn: sqlite3.Connection, country: str, limit: int = 12) -> List[Tuple]:
     cur = conn.cursor()
     cur.execute("""
         SELECT round, action_public,
@@ -206,3 +288,75 @@ def load_recent_history(
         LIMIT ?
     """, (country, int(limit)))
     return cur.fetchall()
+
+
+# -----------------------
+# Round Actions + Locks
+# -----------------------
+def clear_round_data(conn: sqlite3.Connection, round_no: int) -> None:
+    cur = conn.cursor()
+    cur.execute("DELETE FROM round_actions WHERE round = ?", (int(round_no),))
+    cur.execute("DELETE FROM round_locks WHERE round = ?", (int(round_no),))
+    conn.commit()
+
+
+def upsert_round_actions(conn: sqlite3.Connection, round_no: int, country: str, actions_obj: Dict[str, Any]) -> None:
+    """
+    actions_obj Schema:
+    {
+      "aggressiv": {"aktion": "...", "folgen": {...}},
+      "moderate": {...},
+      "passiv": {...}
+    }
+    Wir speichern NUR action_text pro variant.
+    """
+    cur = conn.cursor()
+    for variant in ("aggressiv", "moderate", "passiv"):
+        text = str(actions_obj[variant]["aktion"])
+        cur.execute("""
+            INSERT INTO round_actions (round, country, variant, action_text)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(round, country, variant) DO UPDATE SET action_text = excluded.action_text
+        """, (int(round_no), country, variant, text))
+    conn.commit()
+
+
+def get_round_actions(conn: sqlite3.Connection, round_no: int) -> Dict[str, Dict[str, str]]:
+    """
+    returns: {country: {variant: action_text}}
+    """
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT country, variant, action_text
+        FROM round_actions
+        WHERE round = ?
+    """, (int(round_no),))
+    out: Dict[str, Dict[str, str]] = {}
+    for country, variant, action_text in cur.fetchall():
+        out.setdefault(country, {})[variant] = str(action_text)
+    return out
+
+
+def lock_choice(conn: sqlite3.Connection, round_no: int, country: str, variant: str) -> None:
+    cur = conn.cursor()
+    cur.execute("""
+        INSERT INTO round_locks (round, country, locked_variant)
+        VALUES (?, ?, ?)
+        ON CONFLICT(round, country) DO UPDATE SET locked_variant = excluded.locked_variant, locked_at = CURRENT_TIMESTAMP
+    """, (int(round_no), country, str(variant)))
+    conn.commit()
+
+
+def get_locks(conn: sqlite3.Connection, round_no: int) -> Dict[str, str]:
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT country, locked_variant
+        FROM round_locks
+        WHERE round = ?
+    """, (int(round_no),))
+    return {str(c): str(v) for c, v in cur.fetchall()}
+
+
+def all_locked(conn: sqlite3.Connection, round_no: int, countries: List[str]) -> bool:
+    locks = get_locks(conn, round_no)
+    return all(c in locks for c in countries)
