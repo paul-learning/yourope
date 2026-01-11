@@ -89,6 +89,18 @@ def summarize_recent_actions(rows) -> str:
     return " | ".join(items)
 
 
+def render_metrics(metrics: Dict[str, Any]):
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Wirtschaft", metrics["economy"])
+    c2.metric("Stabilität", metrics["stability"])
+    c3.metric("Militär", metrics["military"])
+    c4, c5 = st.columns(2)
+    c4.metric("Diplomatie", metrics["diplomatic_influence"])
+    c5.metric("Öffentliche Zustimmung", metrics["public_approval"])
+    with st.expander("Ambition"):
+        st.write(metrics["ambition"])
+
+
 # ----------------------------
 # App start
 # ----------------------------
@@ -101,7 +113,7 @@ if not api_key:
     st.error("MISTRAL_API_KEY fehlt. Lege eine .env neben app.py an: MISTRAL_API_KEY=... ")
     st.stop()
 
-# Optional GM "Auth" via env (einfach)
+# Optional GM "Auth" via env
 gm_pin = (os.getenv("GM_PIN") or "").strip()
 
 conn = get_conn()
@@ -118,7 +130,6 @@ phase = meta["phase"]  # setup | actions_generated | actions_published
 
 eu = get_eu_state(conn)
 if not eu["global_context"]:
-    # falls noch leer, initialisieren
     set_eu_state(conn, eu["cohesion"], EU_DEFAULT["global_context"])
     eu = get_eu_state(conn)
 
@@ -144,10 +155,6 @@ st.sidebar.caption(eu["global_context"])
 st.sidebar.write("---")
 st.sidebar.subheader("Reset")
 colA, colB = st.sidebar.columns(2)
-if colA.button("🔄 Reset Land"):
-    # Für Reset Land brauchen wir ein Land – nehmen wir das erste, wenn GM; Spieler wählt unten sein Land.
-    # Das ist absichtlich minimal gehalten: GM nutzt eher "Reset alle".
-    st.sidebar.info("Reset Land ist im aktuellen Flow unten im Länderbereich (dein Land) vorgesehen.")
 if colB.button("💣 Reset alle"):
     reset_all_countries(conn, COUNTRY_DEFS)
     clear_round_data(conn, round_no)
@@ -156,37 +163,46 @@ if colB.button("💣 Reset alle"):
     st.rerun()
 
 # -------------- Layout --------------
-left, right = st.columns([0.60, 0.40], gap="large")
+left, right = st.columns([0.62, 0.38], gap="large")
 
 # ----------------------------
-# RIGHT: Game Master Panel
+# RIGHT: Status/Overview (GM + Spieler)
 # ----------------------------
 with right:
-    st.subheader("🎛️ Game Master Panel")
+    st.subheader("📊 Rundenstatus")
 
     locks = get_locks(conn, round_no)
 
     st.write("**Lock-Status (diese Runde)**")
+    # Spieler dürfen sehen WER gelockt hat – aber NICHT welche Variante (außer GM)
     for c in countries:
         name = countries_display[c]
         if c in locks:
-            st.success(f"{name}: ✅ eingelockt ({locks[c]})")
+            if is_gm:
+                st.success(f"{name}: ✅ eingelockt ({locks[c]})")
+            else:
+                st.success(f"{name}: ✅ eingelockt")
         else:
             st.warning(f"{name}: ⏳ nicht eingelockt")
 
     st.write("---")
+    st.write("**EU**")
+    st.write(f"Kohäsion: **{eu['cohesion']}%**")
+    st.caption(eu["global_context"])
 
+    st.write("---")
+
+    # GM controls below (only GM sees them)
     if not is_gm:
-        st.info("Wechsle in der Sidebar zu **Game Master**, um Runden zu steuern.")
+        st.info("Für Rundensteuerung: in der Sidebar zu **Game Master** wechseln.")
     else:
-        actions_in_db = get_round_actions(conn, round_no)  # {country: {variant: action_text}}
+        st.subheader("🎛️ Game Master Steuerung")
+
+        actions_in_db = get_round_actions(conn, round_no)
         have_all_actions = all((c in actions_in_db and len(actions_in_db[c]) == 3) for c in countries)
         have_all_locks = all_locked(conn, round_no, countries)
 
-        st.write("**Rundensteuerung (sequenziell)**")
-
-        # Generate: erlaubt in setup und actions_generated (damit GM neu würfeln kann),
-        # NICHT mehr, wenn actions_published.
+        # Generate allowed until published
         gen_disabled = (phase == "actions_published")
         if st.button("⚙️ Aktionen für alle generieren", disabled=gen_disabled, use_container_width=True):
             with st.spinner("Generiere Aktionen für alle Länder..."):
@@ -214,7 +230,7 @@ with right:
                 set_game_meta(conn, round_no, "actions_generated")
             st.rerun()
 
-        # Vorschau: GM sieht alles
+        # GM preview
         actions_in_db = get_round_actions(conn, round_no)
         if actions_in_db:
             with st.expander("👀 Vorschau: Generierte Aktionen (alle Länder)"):
@@ -229,13 +245,11 @@ with right:
                     st.write(f"**Passiv:** {a.get('passiv','')}")
                     st.write("---")
 
-        # Publish: nur wenn actions_generated UND alle actions existieren
         publish_disabled = not (phase == "actions_generated" and have_all_actions)
         if st.button("🚦 Runde starten (Optionen veröffentlichen)", disabled=publish_disabled, use_container_width=True):
             set_game_meta(conn, round_no, "actions_published")
             st.rerun()
 
-        # Resolve: nur wenn published UND alle gelockt
         resolve_disabled = not (phase == "actions_published" and have_all_locks)
         if st.button("🧮 Ergebnis der Runde kalkulieren", disabled=resolve_disabled, use_container_width=True):
             with st.spinner("KI kalkuliert Gesamtergebnis der Runde..."):
@@ -257,12 +271,10 @@ with right:
                     max_tokens=1400,
                 )
 
-                # EU anwenden
                 eu_delta = int(result["eu"].get("kohäsion_delta", 0))
                 new_global = str(result["eu"].get("global_context", eu["global_context"]))
                 set_eu_state(conn, eu["cohesion"] + eu_delta, new_global)
 
-                # Länder anwenden + History
                 for c in countries:
                     d = result["länder"][c] or {}
                     apply_country_deltas(conn, c, d)
@@ -278,108 +290,120 @@ with right:
                         deltas=d,
                     )
 
-                # nächste Runde
                 clear_round_data(conn, round_no)
                 set_game_meta(conn, round_no + 1, "setup")
 
             st.success("Runde aufgelöst, Werte gesetzt, nächste Runde gestartet.")
             st.rerun()
 
-        st.write("---")
-        st.caption("Hinweis: Aktionen können bis zur Veröffentlichung neu generiert werden. Nach Veröffentlichung sind die Spieler-Optionen fix.")
+        st.caption("Hinweis: Bis zur Veröffentlichung können Aktionen neu generiert werden. Nach Veröffentlichung sind Optionen fix.")
 
 
 # ----------------------------
-# LEFT: Player View
+# LEFT: Player View (default: own country first)
 # ----------------------------
 with left:
-    st.subheader("🌍 Länderübersicht & Spielerentscheidung")
+    st.subheader("🎮 Spielerbereich")
 
     # Spieler wählt sein Land (Dropdown zeigt display_name, intern bleibt Key)
+    # Wir merken es in session_state, damit es beim Reload default bleibt.
+    if "my_country" not in st.session_state:
+        st.session_state.my_country = countries[0]
+
     country_keys = countries
     country_labels = [countries_display[k] for k in country_keys]
-    selected_label = st.selectbox("Ich spiele:", country_labels, index=0)
+    default_idx = country_keys.index(st.session_state.my_country) if st.session_state.my_country in country_keys else 0
+
+    selected_label = st.selectbox("Ich spiele:", country_labels, index=default_idx)
     my_country = country_keys[country_labels.index(selected_label)]
+    st.session_state.my_country = my_country
 
-    # Optional: Reset NUR eigenes Land (praktisch fürs Testen)
-    if st.button("🔄 Mein Land zurücksetzen (Test)", use_container_width=True):
-        reset_country_to_defaults(conn, my_country, COUNTRY_DEFS[my_country])
-        st.rerun()
-
-    st.write("---")
-
+    # Actions / locks for this round
     actions_texts = get_round_actions(conn, round_no)
     locks_now = get_locks(conn, round_no)
 
-    tabs = st.tabs([countries_display[c] for c in countries])
+    st.write("---")
+    st.subheader(f"🏳️ Mein Land: {countries_display[my_country]}")
 
-    for idx, c in enumerate(countries):
-        with tabs[idx]:
-            m = load_country_metrics(conn, c)
-            if not m:
-                st.error("Land konnte nicht geladen werden.")
-                continue
+    my_metrics = load_country_metrics(conn, my_country)
+    if not my_metrics:
+        st.error("Mein Land konnte nicht geladen werden.")
+    else:
+        render_metrics(my_metrics)
 
-            # Metriken (alle sichtbar)
-            c1, c2, c3 = st.columns(3)
-            c1.metric("Wirtschaft", m["economy"])
-            c2.metric("Stabilität", m["stability"])
-            c3.metric("Militär", m["military"])
-            c4, c5 = st.columns(2)
-            c4.metric("Diplomatie", m["diplomatic_influence"])
-            c5.metric("Öffentliche Zustimmung", m["public_approval"])
+        st.write("---")
 
-            with st.expander("Ambition"):
-                st.write(m["ambition"])
-
-            st.write("---")
-
-            # Aktionen: NUR für eigenes Land sichtbar
-            if c != my_country:
-                st.info("Aktionen sind für andere Länder nicht sichtbar (nur Metriken/History).")
+        # Aktionen: nur eigenes Land sichtbar
+        if phase != "actions_published":
+            st.info("Optionen sind noch nicht veröffentlicht. Warte auf den Game Master.")
+        else:
+            a = actions_texts.get(my_country, {})
+            if not a or len(a) < 3:
+                st.warning("Optionen fehlen noch (GM muss Aktionen generieren und veröffentlichen).")
             else:
-                if phase != "actions_published":
-                    st.info("Optionen sind noch nicht veröffentlicht. Warte auf den Game Master.")
+                st.subheader("Öffentliche Aktion wählen")
+
+                if my_country in locks_now:
+                    st.success("Du bist eingelockt. (Welche Variante bleibt für andere verborgen.)")
                 else:
-                    a = actions_texts.get(c, {})
-                    if not a or len(a) < 3:
-                        st.warning("Optionen fehlen noch (GM muss Aktionen generieren und veröffentlichen).")
-                    else:
-                        st.subheader("Öffentliche Aktion wählen")
+                    st.warning("Du bist noch nicht eingelockt.")
 
-                        if c in locks_now:
-                            st.success(f"Du bist eingelockt: **{locks_now[c]}**")
-                        else:
-                            st.warning("Du bist noch nicht eingelockt.")
+                options = {
+                    "aggressiv": a["aggressiv"],
+                    "moderate": a["moderate"],
+                    "passiv": a["passiv"],
+                }
+                labels = [options["aggressiv"], options["moderate"], options["passiv"]]
+                choice_label = st.radio("Option:", labels, index=1)
 
-                        options = {
-                            "aggressiv": a["aggressiv"],
-                            "moderate": a["moderate"],
-                            "passiv": a["passiv"],
-                        }
-                        labels = [options["aggressiv"], options["moderate"], options["passiv"]]
-                        choice_label = st.radio("Option:", labels, index=1)
+                chosen_variant = next(k for k, v in options.items() if v == choice_label)
 
-                        chosen_variant = next(k for k, v in options.items() if v == choice_label)
+                if st.button("✅ Auswahl einlocken", use_container_width=True):
+                    lock_choice(conn, round_no, my_country, chosen_variant)
+                    st.rerun()
 
-                        if st.button("✅ Auswahl einlocken", use_container_width=True):
-                            lock_choice(conn, round_no, c, chosen_variant)
-                            st.rerun()
-
-            # History
-            with st.expander("Turn-History"):
-                rows = load_recent_history(conn, c, limit=12)
-                if not rows:
-                    st.write("Noch keine Runden gespielt.")
-                else:
-                    for r in rows:
-                        st.markdown(
-                            f"""
+        with st.expander("Turn-History (Mein Land)"):
+            rows = load_recent_history(conn, my_country, limit=12)
+            if not rows:
+                st.write("Noch keine Runden gespielt.")
+            else:
+                for r in rows:
+                    st.markdown(
+                        f"""
 **Runde {r[0]}**  
 Aktion: {r[1]}  
 Δ Militär {r[2]}, Δ Stabilität {r[3]}, Δ Wirtschaft {r[4]}, Δ Diplomatie {r[5]}, Δ Zustimmung {r[6]}  
 Kontext: {r[7]}
 """
-                        )
+                    )
+
+    st.write("---")
+    with st.expander("🌍 Andere Länder (nur Metriken/History)"):
+        tabs = st.tabs([countries_display[c] for c in countries if c != my_country])
+        other_countries = [c for c in countries if c != my_country]
+
+        for idx, c in enumerate(other_countries):
+            with tabs[idx]:
+                m = load_country_metrics(conn, c)
+                if not m:
+                    st.error("Land konnte nicht geladen werden.")
+                    continue
+
+                render_metrics(m)
+
+                with st.expander("Turn-History"):
+                    rows = load_recent_history(conn, c, limit=12)
+                    if not rows:
+                        st.write("Noch keine Runden gespielt.")
+                    else:
+                        for r in rows:
+                            st.markdown(
+                                f"""
+**Runde {r[0]}**  
+Aktion: {r[1]}  
+Δ Militär {r[2]}, Δ Stabilität {r[3]}, Δ Wirtschaft {r[4]}, Δ Diplomatie {r[5]}, Δ Zustimmung {r[6]}  
+Kontext: {r[7]}
+"""
+                            )
 
 conn.close()
