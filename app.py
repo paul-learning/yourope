@@ -663,6 +663,7 @@ with left:
 
     actions_texts = get_round_actions(conn, round_no)
     locks_now = get_locks(conn, round_no)
+    action_impacts = get_round_action_impacts(conn, round_no)
 
     st.write("---")
     st.subheader(f"🏳️ Mein Land: {countries_display[my_country]}")
@@ -734,6 +735,15 @@ with left:
                 }
                 labels = [options["aggressiv"], options["moderate"], options["passiv"]]
                 choice_label = st.radio("Option:", labels, index=1)
+                chosen_variant = next(k for k, v in options.items() if v == choice_label)
+
+                # Impact Preview (nur eigenes Land)
+                folgen = (action_impacts.get(my_country, {}) or {}).get(chosen_variant, {}) or {}
+                if folgen:
+                    st.caption("**Voraussichtliche Wirkung:** " + impact_preview_text(folgen))
+                else:
+                    st.caption("Voraussichtliche Wirkung: (noch keine Daten / alte Runde ohne Impact gespeichert)")
+
                 with st.expander("Alle Wirkungen vergleichen", expanded=False):
                     for v in ("aggressiv", "moderate", "passiv"):
                         folgen_v = (action_impacts.get(my_country, {}) or {}).get(v, {}) or {}
@@ -741,15 +751,16 @@ with left:
                         st.write(options[v])
                         if folgen_v:
                             st.caption(impact_preview_text(folgen_v))
+                        else:
+                            st.caption("(keine Impact-Daten)")
                         st.write("---")
 
-                chosen_variant = next(k for k, v in options.items() if v == choice_label)
                 # Impact Preview (nur eigenes Land)
-                folgen = (action_impacts.get(my_country, {}) or {}).get(chosen_variant, {}) or {}
-                if folgen:
-                    st.caption("**Voraussichtliche Wirkung:** " + impact_preview_text(folgen))
-                else:
-                    st.caption("Voraussichtliche Wirkung: (noch keine Daten / alte Runde ohne Impact gespeichert)")
+                #folgen = (action_impacts.get(my_country, {}) or {}).get(chosen_variant, {}) or {}
+                #if folgen:
+                #    st.caption("**Voraussichtliche Wirkung:** " + impact_preview_text(folgen))
+                #else:
+                #    st.caption("Voraussichtliche Wirkung: (noch keine Daten / alte Runde ohne Impact gespeichert)")
 
                 if st.button("✅ Auswahl einlocken", use_container_width=True):
                     lock_choice(conn, round_no, my_country, chosen_variant)
