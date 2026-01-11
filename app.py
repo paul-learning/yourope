@@ -836,7 +836,7 @@ with left:
                 eu=eu,
                 countries_display=countries_display,
                 my_country=effective_country,
-                is_lock_disabled=True,  # GM cannot lock in simulation
+                is_lock_disabled=False,  # GM can lock in simulation
             )
     else:
         st.subheader("🎮 Spielerbereich")
