@@ -2,6 +2,8 @@
 import os
 from pathlib import Path
 from typing import Dict, Any
+from win import evaluate_country_win_conditions, evaluate_all_countries
+
 
 import streamlit as st
 from dotenv import load_dotenv
@@ -191,7 +193,35 @@ with right:
     st.caption(eu["global_context"])
 
     st.write("---")
+        # --- Win-Status (alle sehen: ob jemand gewonnen hat; Details pro Land zeigen wir in Player-Panel)
+    all_metrics_now = load_all_country_metrics(conn, countries)
+    eu_now = get_eu_state(conn)  # frische EU-Werte aus DB
+    win_eval = evaluate_all_countries(
+        all_country_metrics=all_metrics_now,
+        eu_state=eu_now,
+        country_defs=COUNTRY_DEFS,
+    )
 
+    winners = [countries_display[c] for c in countries if win_eval.get(c, {}).get("is_winner")]
+    if winners:
+        st.success("🏆 Gewinner erreicht: " + ", ".join(winners))
+    else:
+        st.caption("Noch kein Land hat die Siegbedingungen vollständig erfüllt.")
+    st.write("---")
+     # --- GM Detail: Siegfortschritt aller Länder
+    with st.expander("📈 Siegfortschritt (GM Detail)"):
+        for c in countries:
+            st.markdown(f"### {countries_display[c]}")
+            res = win_eval[c]["results"]
+            if not res:
+                st.caption("Keine Bedingungen definiert.")
+                continue
+            for r in res:
+                st.write(
+                    ("✅ " if r.ok else "❌ ")
+                    + f"{r.label} (aktuell: {r.current})"
+                )
+            st.write("---")
     # GM controls below (only GM sees them)
     if not is_gm:
         st.info("Für Rundensteuerung: in der Sidebar zu **Game Master** wechseln.")
@@ -332,7 +362,32 @@ with left:
         render_metrics(my_metrics)
 
         st.write("---")
+        # --- Siegfortschritt (nur für mein Land)
+        eu_now = get_eu_state(conn)
+        is_winner, cond_results = evaluate_country_win_conditions(
+            my_country,
+            country_metrics=my_metrics,
+            eu_state=eu_now,
+            country_defs=COUNTRY_DEFS,
+        )
 
+        st.write("---")
+        st.subheader("🏁 Siegfortschritt")
+
+        if not cond_results:
+            st.warning("Für dieses Land sind noch keine Siegbedingungen definiert (countries.py: win_conditions).")
+        else:
+            if is_winner:
+                st.success("✅ Siegbedingungen erfüllt! Du hast gewonnen.")
+            else:
+                st.info("Noch nicht gewonnen — es fehlen noch Bedingungen:")
+
+            for r in cond_results:
+                if r.ok:
+                    st.write(f"✅ {r.label}  (aktuell: {r.current})")
+                else:
+                    st.write(f"❌ {r.label}  (aktuell: {r.current})")
+        st.write("---")
         # Aktionen: nur eigenes Land sichtbar
         if phase != "actions_published":
             st.info("Optionen sind noch nicht veröffentlicht. Warte auf den Game Master.")
