@@ -337,16 +337,31 @@ with left:
 
     # Spieler wählt sein Land (Dropdown zeigt display_name, intern bleibt Key)
     # Wir merken es in session_state, damit es beim Reload default bleibt.
+    # Spieler-Land persistent & rerun-sicher
     if "my_country" not in st.session_state:
         st.session_state.my_country = countries[0]
 
     country_keys = countries
     country_labels = [countries_display[k] for k in country_keys]
-    default_idx = country_keys.index(st.session_state.my_country) if st.session_state.my_country in country_keys else 0
 
-    selected_label = st.selectbox("Ich spiele:", country_labels, index=default_idx)
-    my_country = country_keys[country_labels.index(selected_label)]
-    st.session_state.my_country = my_country
+    def _on_country_change():
+        # label -> key zurück mappen
+        label = st.session_state.my_country_label
+        st.session_state.my_country = country_keys[country_labels.index(label)]
+
+    # Initialen Label-Wert setzen (nur wenn noch nicht da)
+    if "my_country_label" not in st.session_state:
+        st.session_state.my_country_label = countries_display[st.session_state.my_country]
+
+    st.selectbox(
+        "Ich spiele:",
+        country_labels,
+        key="my_country_label",
+        on_change=_on_country_change,
+    )
+
+    my_country = st.session_state.my_country
+
 
     # Actions / locks for this round
     actions_texts = get_round_actions(conn, round_no)
