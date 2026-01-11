@@ -6,6 +6,7 @@ from typing import Dict, Any, List, Tuple
 import streamlit as st
 from dotenv import load_dotenv
 
+
 from countries import COUNTRY_DEFS, EU_DEFAULT
 from db import (
     get_conn,
@@ -35,6 +36,8 @@ from db import (
     clear_external_events,
     upsert_external_event,
     get_external_events,
+    get_round_action_impacts,
+
 )
 from ai_round import generate_actions_for_country, resolve_round_all_countries, generate_round_summary
 from ai_external import generate_external_moves
@@ -71,6 +74,56 @@ def render_metrics(metrics: Dict[str, Any]):
     c5.metric("Öffentliche Zustimmung", metrics["public_approval"])
     with st.expander("Ambition"):
         st.write(metrics["ambition"])
+
+def pressure_badge(label: str, value: int) -> str:
+    # 0..100
+    if value >= 70:
+        icon = "🔴"
+        lvl = "hoch"
+    elif value >= 40:
+        icon = "🟡"
+        lvl = "mittel"
+    else:
+        icon = "🟢"
+        lvl = "niedrig"
+    return f"{icon} {label}: {lvl}"
+
+def _arrow(delta: int) -> str:
+    if delta >= 3:
+        return "⬆️"
+    if delta <= -3:
+        return "⬇️"
+    return "➖"
+
+def impact_preview_text(folgen: Dict[str, Any]) -> str:
+    """
+    Folgen-Schema: {"land": {"militär":..,"stabilität":..,"wirtschaft":..,"diplomatie":..,"öffentliche_zustimmung":..},
+                    "eu": {"kohäsion":..},
+                    "global_context": "..."}
+    """
+    land = (folgen or {}).get("land", {}) or {}
+    eu = (folgen or {}).get("eu", {}) or {}
+
+    dm = int(land.get("militär", 0))
+    ds = int(land.get("stabilität", 0))
+    de = int(land.get("wirtschaft", 0))
+    dd = int(land.get("diplomatie", 0))
+    dp = int(land.get("öffentliche_zustimmung", 0))
+    dcoh = int(eu.get("kohäsion", 0))
+
+    # Risiko grob: max abs delta
+    max_abs = max(abs(dm), abs(ds), abs(de), abs(dd), abs(dp), abs(dcoh))
+    if max_abs >= 9:
+        risk = "Risiko: 🔥 hoch"
+    elif max_abs >= 6:
+        risk = "Risiko: ⚠️ mittel"
+    else:
+        risk = "Risiko: ✅ niedrig"
+
+    return (
+        f"Mil {_arrow(dm)}  Sta {_arrow(ds)}  Wir {_arrow(de)}  Dip {_arrow(dd)}  Zust {_arrow(dp)}  "
+        f"EU {_arrow(dcoh)}  •  {risk}"
+    )
 
 
 def format_external_events(events: List[Dict[str, Any]]) -> str:
@@ -239,6 +292,8 @@ st.sidebar.header("Rolle")
 role = st.sidebar.selectbox("Ansicht", ["Spieler", "Game Master"], index=0)
 is_gm = (role == "Game Master")
 
+
+
 if is_gm and gm_pin:
     entered = st.sidebar.text_input("GM PIN", type="password")
     if entered != gm_pin:
@@ -298,12 +353,18 @@ with right:
     st.write("---")
     st.write("**EU & Druckwerte**")
     st.write(f"Kohäsion: **{eu['cohesion']}%**")
-    st.write(
-        f"Threat **{eu['threat_level']}** | Frontline **{eu['frontline_pressure']}** | "
-        f"Energy **{eu['energy_pressure']}** | Migration **{eu['migration_pressure']}** | "
-        f"Disinfo **{eu['disinfo_pressure']}** | TradeWar **{eu['trade_war_pressure']}**"
-    )
+    c1, c2 = st.columns(2)
+    c1.write(pressure_badge("Threat", eu["threat_level"]))
+    c1.write(pressure_badge("Frontline", eu["frontline_pressure"]))
+    c2.write(pressure_badge("Energy", eu["energy_pressure"]))
+    c2.write(pressure_badge("Migration", eu["migration_pressure"]))
+
+    with st.expander("Mehr Details (Druckwerte)"):
+        st.write(f"Disinfo: {eu['disinfo_pressure']} / 100")
+        st.write(f"TradeWar: {eu['trade_war_pressure']} / 100")
+
     st.caption(eu["global_context"])
+
 
     st.write("---")
 
@@ -480,6 +541,7 @@ with right:
 
                 actions_texts = get_round_actions(conn, round_no)
                 locks_now = get_locks(conn, round_no)
+                action_impacts = get_round_action_impacts(conn, round_no)
                 all_metrics = load_all_country_metrics(conn, countries)
 
                 # chosen actions string (for summary)
@@ -609,8 +671,24 @@ with left:
     if not my_metrics:
         st.error("Mein Land konnte nicht geladen werden.")
     else:
-        render_metrics(my_metrics)
+        with st.sidebar.expander("📘 Werte erklärt (Kurz)", expanded=False):
+            st.markdown("""
+        **Militär**: Abschreckung/Verteidigung. Hilft bei hohem Threat/Frontline, kann innenpolitisch polarisieren. 
+                        
+        **Stabilität**: Regierungsfähigkeit/Protestresistenz. Niedrig → Krisenanfälligkeit.  
+                        
+        **Wirtschaft**: Wachstum/Inflation/Haushalt. Niedrig → Zustimmung fällt schneller.  
+                        
+        **Diplomatie**: Fähigkeit zu Deals/Koalitionen/Sanktionen. Hoch → bessere Kompromisse.  
+                        
+        **Öffentliche Zustimmung**: Rückendeckung. Niedrig → riskante Entscheidungen “kosten” stärker.
 
+        **Druckwerte (EU):**  
+        **Threat/Frontline** = Kriegsrisiko & Ostflanken-Spannung.  
+        **Energy/Migration/Disinfo/TradeWar** erhöhen innenpolitischen Stress & Spaltung.
+        """)
+        render_metrics(my_metrics)
+    
         # optional win progress
         if evaluate_country_win_conditions is not None:
             eu_now = get_eu_state(conn)
@@ -656,8 +734,22 @@ with left:
                 }
                 labels = [options["aggressiv"], options["moderate"], options["passiv"]]
                 choice_label = st.radio("Option:", labels, index=1)
+                with st.expander("Alle Wirkungen vergleichen", expanded=False):
+                    for v in ("aggressiv", "moderate", "passiv"):
+                        folgen_v = (action_impacts.get(my_country, {}) or {}).get(v, {}) or {}
+                        st.write(f"**{v.capitalize()}**")
+                        st.write(options[v])
+                        if folgen_v:
+                            st.caption(impact_preview_text(folgen_v))
+                        st.write("---")
 
                 chosen_variant = next(k for k, v in options.items() if v == choice_label)
+                # Impact Preview (nur eigenes Land)
+                folgen = (action_impacts.get(my_country, {}) or {}).get(chosen_variant, {}) or {}
+                if folgen:
+                    st.caption("**Voraussichtliche Wirkung:** " + impact_preview_text(folgen))
+                else:
+                    st.caption("Voraussichtliche Wirkung: (noch keine Daten / alte Runde ohne Impact gespeichert)")
 
                 if st.button("✅ Auswahl einlocken", use_container_width=True):
                     lock_choice(conn, round_no, my_country, chosen_variant)

@@ -96,6 +96,10 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
         PRIMARY KEY (round, country, variant)
     )
     """)
+    # --- Migration: impact_json für Aktions-Vorschau (Spielerverständnis)
+    if not _col_exists(conn, "round_actions", "impact_json"):
+        cur.execute("ALTER TABLE round_actions ADD COLUMN impact_json TEXT")
+
 
     # Locks (players lock choice)
     cur.execute("""
@@ -399,15 +403,26 @@ def clear_round_data(conn: sqlite3.Connection, round_no: int) -> None:
 
 
 def upsert_round_actions(conn: sqlite3.Connection, round_no: int, country: str, actions_obj: Dict[str, Any]) -> None:
+    """
+    Save action_text per variant (public) + impact_json (folgen).
+    impact_json enthält typischerweise:
+      {"land": {...}, "eu": {...}, "global_context": "..."}
+    """
     cur = conn.cursor()
     for variant in ("aggressiv", "moderate", "passiv"):
         text = str(actions_obj[variant]["aktion"])
+        folgen = actions_obj[variant].get("folgen", {}) or {}
+        impact_json = json.dumps(folgen, ensure_ascii=False)
+
         cur.execute("""
-            INSERT INTO round_actions (round, country, variant, action_text)
-            VALUES (?, ?, ?, ?)
-            ON CONFLICT(round, country, variant) DO UPDATE SET action_text = excluded.action_text
-        """, (int(round_no), country, variant, text))
+            INSERT INTO round_actions (round, country, variant, action_text, impact_json)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(round, country, variant) DO UPDATE SET
+                action_text = excluded.action_text,
+                impact_json = excluded.impact_json
+        """, (int(round_no), country, variant, text, impact_json))
     conn.commit()
+
 
 
 def get_round_actions(conn: sqlite3.Connection, round_no: int) -> Dict[str, Dict[str, str]]:
@@ -420,6 +435,27 @@ def get_round_actions(conn: sqlite3.Connection, round_no: int) -> Dict[str, Dict
     out: Dict[str, Dict[str, str]] = {}
     for country, variant, action_text in cur.fetchall():
         out.setdefault(str(country), {})[str(variant)] = str(action_text)
+    return out
+def get_round_action_impacts(conn: sqlite3.Connection, round_no: int) -> Dict[str, Dict[str, Dict[str, Any]]]:
+    """
+    returns: {country: {variant: folgen_dict}}
+    folgen_dict kann leer sein, wenn alte Daten ohne impact_json existieren.
+    """
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT country, variant, impact_json
+        FROM round_actions
+        WHERE round = ?
+    """, (int(round_no),))
+    out: Dict[str, Dict[str, Dict[str, Any]]] = {}
+    for country, variant, impact_json in cur.fetchall():
+        folgen = {}
+        if impact_json:
+            try:
+                folgen = json.loads(impact_json)
+            except Exception:
+                folgen = {}
+        out.setdefault(str(country), {})[str(variant)] = folgen
     return out
 
 
