@@ -1,7 +1,5 @@
-# app.py
 import os
 import html
-
 from pathlib import Path
 from typing import Dict, Any, List
 
@@ -22,6 +20,8 @@ from db import (
     set_eu_state,
     get_game_meta,
     set_game_meta,
+    set_game_over,
+    clear_game_over,
     clear_round_data,
     upsert_round_actions,
     get_round_actions,
@@ -34,6 +34,9 @@ from db import (
     get_recent_round_summaries,
     upsert_round_summary,
     clear_all_round_summaries,
+    # snapshots/dashboard
+    upsert_country_snapshot,
+    get_country_snapshots,
     # external
     clear_external_events,
     upsert_external_event,
@@ -60,6 +63,11 @@ except Exception:
 # Streamlit config
 # ----------------------------
 st.set_page_config(page_title="eugenia", layout="wide")
+
+
+# ----------------------------
+# CSS
+# ----------------------------
 st.markdown(
     """
 <style>
@@ -113,13 +121,7 @@ st.markdown(
   border-style: solid;
   border-color: rgba(17, 17, 17, 0.95) transparent transparent transparent;
 }
-</style>
-""",
-    unsafe_allow_html=True,
-)
-st.markdown(
-    """
-<style>
+
 .eug-kv { margin: 0.15rem 0; }
 .eug-kv-row{
   display:flex; justify-content:space-between; align-items:baseline;
@@ -128,7 +130,6 @@ st.markdown(
 }
 .eug-kv-label{ font-size: 0.88rem; opacity: 0.85; }
 .eug-kv-value{ font-size: 0.95rem; font-weight: 600; }
-.eug-kv-sub{ font-size: 0.78rem; opacity: 0.75; margin-top: 0.05rem; }
 </style>
 """,
     unsafe_allow_html=True,
@@ -140,6 +141,9 @@ def load_env():
     load_dotenv(env_path)
 
 
+# ----------------------------
+# helpers
+# ----------------------------
 def summarize_recent_actions(rows) -> str:
     if not rows:
         return "Keine."
@@ -147,19 +151,6 @@ def summarize_recent_actions(rows) -> str:
     for r in rows[:6]:
         items.append(f"R{r[0]}: {r[1]}")
     return " | ".join(items)
-
-
-def pressure_badge(label: str, value: int) -> str:
-    if value >= 70:
-        icon = "🔴"
-        lvl = "hoch"
-    elif value >= 40:
-        icon = "🟡"
-        lvl = "mittel"
-    else:
-        icon = "🟢"
-        lvl = "niedrig"
-    return f"{icon} {label}: {lvl}"
 
 
 def format_external_events(events: List[Dict[str, Any]]) -> str:
@@ -297,31 +288,10 @@ def decay_pressures(eu: Dict[str, Any]) -> Dict[str, Any]:
     out["disinfo_pressure"] = out["disinfo_pressure"] - 3
     out["trade_war_pressure"] = out["trade_war_pressure"] - 3
     return out
-def compact_kv(label: str, value: Any, help_text: str | None = None):
-    # Optional: info-icon rechts neben dem Label
-    label_html = label
-    if help_text:
-        # nutzt deine _info_icon()-Logik NICHT direkt (weil die st.markdown schreibt),
-        # wir bauen das Icon inline als HTML (gleiche tooltip-klasse wie vorher).
-        import html as _html
-        safe = _html.escape(help_text)
-        label_html = f"""{label} <span class="eug-tooltip" style="margin-left:4px;">ℹ️<span class="eug-tooltiptext">{safe}</span></span>"""
-
-    st.markdown(
-        f"""
-<div class="eug-kv">
-  <div class="eug-kv-row">
-    <div class="eug-kv-label">{label_html}</div>
-    <div class="eug-kv-value">{value}</div>
-  </div>
-</div>
-""",
-        unsafe_allow_html=True,
-    )
 
 
 # ----------------------------
-# UI: Info tooltips instead of "Werte kurz erklärt"
+# UI helpers: compact list rows + tooltips
 # ----------------------------
 VALUE_HELP = {
     "Wirtschaft": "Wachstum/Inflation/Haushalt. Niedrig → Zustimmung fällt schneller.",
@@ -339,17 +309,23 @@ VALUE_HELP = {
 }
 
 
-def _info_icon(help_text: str) -> None:
-        # Escape to avoid breaking HTML
-        safe = html.escape(help_text or "")
-        st.markdown(
-            f"""
-    <span class="eug-tooltip">ℹ️
-    <span class="eug-tooltiptext">{safe}</span>
-    </span>
-    """,
-            unsafe_allow_html=True,
-        )
+def compact_kv(label: str, value: Any, help_text: str | None = None):
+    label_html = label
+    if help_text:
+        safe = html.escape(help_text)
+        label_html = f"""{label} <span class="eug-tooltip" style="margin-left:4px;">ℹ️<span class="eug-tooltiptext">{safe}</span></span>"""
+
+    st.markdown(
+        f"""
+<div class="eug-kv">
+  <div class="eug-kv-row">
+    <div class="eug-kv-label">{label_html}</div>
+    <div class="eug-kv-value">{value}</div>
+  </div>
+</div>
+""",
+        unsafe_allow_html=True,
+    )
 
 
 def metric_with_info(label: str, value: Any, help_text: str) -> None:
@@ -357,12 +333,19 @@ def metric_with_info(label: str, value: Any, help_text: str) -> None:
     with a:
         st.metric(label, value)
     with b:
-        _info_icon(help_text)
+        safe = html.escape(help_text or "")
+        st.markdown(
+            f"""
+<span class="eug-tooltip">ℹ️
+  <span class="eug-tooltiptext">{safe}</span>
+</span>
+""",
+            unsafe_allow_html=True,
+        )
 
 
 def render_my_metrics_panel(metrics: Dict[str, Any], country_display_name: str) -> None:
     st.subheader(f"🏳️ {country_display_name} — Werte")
-
     compact_kv("Wirtschaft", metrics["economy"], VALUE_HELP["Wirtschaft"])
     compact_kv("Stabilität", metrics["stability"], VALUE_HELP["Stabilität"])
     compact_kv("Militär", metrics["military"], VALUE_HELP["Militär"])
@@ -373,6 +356,17 @@ def render_my_metrics_panel(metrics: Dict[str, Any], country_display_name: str) 
         with st.expander("🎯 Ambition", expanded=False):
             st.write(metrics["ambition"])
 
+
+def _progress_from_conditions(cond_results) -> float:
+    # cond_results ist eine Liste von Objekten mit .ok (aus win.py). Robust fallback:
+    try:
+        total = len(cond_results)
+        if total <= 0:
+            return 0.0
+        ok = sum(1 for r in cond_results if getattr(r, "ok", False))
+        return round(ok / total * 100.0, 2)
+    except Exception:
+        return 0.0
 
 
 def render_news_panel(
@@ -386,11 +380,9 @@ def render_news_panel(
 ) -> None:
     st.subheader("🗞️ News")
 
-    # Global context (EU-/Weltlage)
     if eu.get("global_context"):
         st.info(eu["global_context"])
 
-    # Außenmächte-Moves (öffentlich)
     ext_events = get_external_events(conn, round_no)
     if ext_events:
         with st.expander("🌐 Außenmächte-Moves (öffentlich)", expanded=True):
@@ -399,7 +391,6 @@ def render_news_panel(
     else:
         st.caption("Keine Außenmächte-Moves (noch nicht generiert / nicht veröffentlicht).")
 
-    # Aktionen der anderen Spieler aus der letzten Runde (togglebar)
     with st.expander("🗂️ Letzte Runde — Aktionen der anderen Länder", expanded=False):
         any_rows = False
         for c in countries:
@@ -418,7 +409,6 @@ def render_news_panel(
         if not any_rows:
             st.caption("Noch keine Historie vorhanden.")
 
-    # Memory / Zusammenfassungen
     with st.expander("🧠 Letzte Runden (Memory)", expanded=False):
         mem = get_recent_round_summaries(conn, limit=5)
         if not mem:
@@ -426,6 +416,64 @@ def render_news_panel(
         else:
             for r, s in reversed(mem):
                 st.markdown(f"**Runde {r}**\n\n{s}")
+
+
+def render_public_dashboard(conn, *, countries: List[str], countries_display: Dict[str, str]):
+    st.subheader("📊 Öffentliches Dashboard")
+
+    snapshots = get_country_snapshots(conn)
+    if not snapshots:
+        st.caption("Noch keine Daten: Dashboard füllt sich nach dem ersten Resolve (Runde 1).")
+        return
+
+    # Leaderboard = letzte Runde pro Land
+    latest_by_country: Dict[str, Dict[str, Any]] = {}
+    for row in snapshots:
+        c = row["country"]
+        if c not in latest_by_country or row["round"] > latest_by_country[c]["round"]:
+            latest_by_country[c] = row
+
+    leaderboard = sorted(latest_by_country.values(), key=lambda x: (x["victory_progress"], x["public_approval"]), reverse=True)
+
+    cols = st.columns([0.35, 0.18, 0.16, 0.16, 0.15])
+    cols[0].markdown("**Land**")
+    cols[1].markdown("**Sieg %**")
+    cols[2].markdown("**Approval**")
+    cols[3].markdown("**Stabilität**")
+    cols[4].markdown("**Wirtschaft**")
+
+    for r in leaderboard:
+        name = countries_display.get(r["country"], r["country"])
+        badge = "🏆 " if r["is_winner"] else ""
+        cols = st.columns([0.35, 0.18, 0.16, 0.16, 0.15])
+        cols[0].write(f"{badge}{name}")
+        cols[1].write(f"{r['victory_progress']:.0f}%")
+        cols[2].write(r["public_approval"])
+        cols[3].write(r["stability"])
+        cols[4].write(r["economy"])
+
+    st.write("---")
+
+    try:
+        import pandas as pd
+    except Exception:
+        st.caption("pandas nicht verfügbar → Charts deaktiviert.")
+        return
+
+    df = pd.DataFrame(snapshots)
+    df["country_name"] = df["country"].map(lambda x: countries_display.get(x, x))
+
+    metric = st.selectbox(
+        "Chart-Metrik",
+        ["victory_progress", "economy", "stability", "military", "diplomatic_influence", "public_approval"],
+        index=0,
+    )
+
+    pivot = df.pivot_table(index="round", columns="country_name", values=metric, aggfunc="max").sort_index()
+    st.line_chart(pivot, height=280)
+
+    if metric != "victory_progress":
+        st.caption("Tipp: Stelle auf `victory_progress`, um den Siegfokus zu sehen.")
 
 
 def render_player_view(
@@ -442,55 +490,56 @@ def render_player_view(
     action_impacts = get_round_action_impacts(conn, round_no)
     locks_now = get_locks(conn, round_no)
 
-    # Aktionen (unter News) – nur wenn veröffentlicht
+    if phase == "game_over":
+        st.info("Game Over – keine Aktionen mehr möglich.")
+        return
+
     if phase != "actions_published":
         st.info("Optionen sind noch nicht veröffentlicht. Warte auf den Game Master.")
+        return
+
+    a = actions_texts.get(my_country, {})
+    if not a or len(a) < 3:
+        st.warning("Optionen fehlen noch (GM muss Aktionen generieren und veröffentlichen).")
+        return
+
+    st.subheader("🎮 Öffentliche Aktion wählen")
+
+    if my_country in locks_now:
+        st.success("✅ Eingelockt. (Welche Variante bleibt für andere verborgen.)")
     else:
-        a = actions_texts.get(my_country, {})
-        if not a or len(a) < 3:
-            st.warning("Optionen fehlen noch (GM muss Aktionen generieren und veröffentlichen).")
-        else:
-            st.subheader("🎮 Öffentliche Aktion wählen")
+        st.warning("⏳ Noch nicht eingelockt.")
 
-            if my_country in locks_now:
-                st.success("✅ Eingelockt. (Welche Variante bleibt für andere verborgen.)")
+    options = {
+        "aggressiv": a["aggressiv"],
+        "moderate": a["moderate"],
+        "passiv": a["passiv"],
+    }
+    labels = [options["aggressiv"], options["moderate"], options["passiv"]]
+    choice_label = st.radio("Option:", labels, index=1)
+    chosen_variant = next(k for k, v in options.items() if v == choice_label)
+
+    folgen = (action_impacts.get(my_country, {}) or {}).get(chosen_variant, {}) or {}
+    if folgen:
+        st.caption("**Voraussichtliche Wirkung:** " + impact_preview_text(folgen))
+    else:
+        st.caption("Voraussichtliche Wirkung: (noch keine Daten / alte Runde ohne Impact gespeichert)")
+
+    with st.expander("Alle Wirkungen vergleichen", expanded=False):
+        for v in ("aggressiv", "moderate", "passiv"):
+            folgen_v = (action_impacts.get(my_country, {}) or {}).get(v, {}) or {}
+            st.write(f"**{v.capitalize()}**")
+            st.write(options[v])
+            if folgen_v:
+                st.caption(impact_preview_text(folgen_v))
             else:
-                st.warning("⏳ Noch nicht eingelockt.")
+                st.caption("(keine Impact-Daten)")
+            st.write("---")
 
-            options = {
-                "aggressiv": a["aggressiv"],
-                "moderate": a["moderate"],
-                "passiv": a["passiv"],
-            }
-            labels = [options["aggressiv"], options["moderate"], options["passiv"]]
-            choice_label = st.radio("Option:", labels, index=1)
-            chosen_variant = next(k for k, v in options.items() if v == choice_label)
+    if st.button("✅ Auswahl einlocken", use_container_width=True, disabled=is_lock_disabled):
+        lock_choice(conn, round_no, my_country, chosen_variant)
+        st.rerun()
 
-            folgen = (action_impacts.get(my_country, {}) or {}).get(chosen_variant, {}) or {}
-            if folgen:
-                st.caption("**Voraussichtliche Wirkung:** " + impact_preview_text(folgen))
-            else:
-                st.caption("Voraussichtliche Wirkung: (noch keine Daten / alte Runde ohne Impact gespeichert)")
-
-            with st.expander("Alle Wirkungen vergleichen", expanded=False):
-                for v in ("aggressiv", "moderate", "passiv"):
-                    folgen_v = (action_impacts.get(my_country, {}) or {}).get(v, {}) or {}
-                    st.write(f"**{v.capitalize()}**")
-                    st.write(options[v])
-                    if folgen_v:
-                        st.caption(impact_preview_text(folgen_v))
-                    else:
-                        st.caption("(keine Impact-Daten)")
-                    st.write("---")
-
-            if st.button("✅ Auswahl einlocken", use_container_width=True, disabled=is_lock_disabled):
-                lock_choice(conn, round_no, my_country, chosen_variant)
-                st.rerun()
-
-            if is_lock_disabled:
-                st.caption("GM-Hinweis: In der simulierten Spieleransicht ist Einlocken deaktiviert.")
-
-    # Eigene Historie bleibt unter Aktionen (togglebar)
     with st.expander("📜 Turn-History (Mein Land)", expanded=False):
         rows = load_recent_history(conn, my_country, limit=12)
         if not rows:
@@ -510,10 +559,6 @@ Kontext: {r[7]}
 # ----------------------------
 # App start
 # ----------------------------
-<<<<<<< HEAD
-st.set_page_config(page_title="eugenia", layout="wide")
-=======
->>>>>>> ui-rework
 st.title("eugenia - save europe, save yourself")
 
 load_env()
@@ -577,9 +622,7 @@ if is_gm and gm_pin:
         conn.close()
         st.stop()
 
-# ----------------------------
 # GM: Spieleransicht simulieren
-# ----------------------------
 if "gm_view_enabled" not in st.session_state:
     st.session_state.gm_view_enabled = False
 if "gm_view_country" not in st.session_state:
@@ -603,7 +646,6 @@ if is_gm:
         else:
             st.session_state.gm_view_country = None
 
-# Effective country for player UI
 effective_country = None
 is_simulating_player_view = False
 if is_gm and st.session_state.get("gm_view_enabled") and st.session_state.get("gm_view_country"):
@@ -622,7 +664,9 @@ if not is_gm and not effective_country:
 # ----------------------------
 meta = get_game_meta(conn)
 round_no = meta["round"]
-phase = meta["phase"]  # setup -> external_generated -> actions_generated -> actions_published
+phase = meta["phase"]
+winner_country = meta.get("winner_country")
+winner_round = meta.get("winner_round")
 
 eu = get_eu_state(conn)
 if not eu["global_context"]:
@@ -640,10 +684,12 @@ if not eu["global_context"]:
     eu = get_eu_state(conn)
 
 # ----------------------------
-# Sidebar: Rundenstatus (togglebar, statt rechter Spalte)
+# Sidebar: Rundenstatus
 # ----------------------------
 with st.sidebar.expander("📊 Rundenstatus", expanded=False):
     st.write(f"**Runde:** {round_no}  |  **Phase:** {phase}")
+    if phase == "game_over" and winner_country:
+        st.success(f"🏆 Gewinner: {countries_display.get(winner_country, winner_country)} (R{winner_round})")
 
     locks = get_locks(conn, round_no)
     st.write("**Lock-Status (diese Runde)**")
@@ -701,6 +747,7 @@ if is_gm:
         clear_round_data(conn, round_no)
         clear_all_round_summaries(conn)
         clear_external_events(conn, round_no)
+        clear_game_over(conn)
         set_eu_state(
             conn,
             cohesion=EU_DEFAULT.get("cohesion", 75),
@@ -719,7 +766,6 @@ if is_gm:
 # Layout: Center + Right
 # ----------------------------
 center, right = st.columns([0.66, 0.34], gap="large")
-
 panel_country = effective_country if effective_country else assigned_country
 
 # ----------------------------
@@ -745,11 +791,9 @@ with right:
     compact_kv("Frontline", f"{eu['frontline_pressure']}/100", VALUE_HELP["Frontline"])
     compact_kv("Energy", f"{eu['energy_pressure']}/100", VALUE_HELP["Energy"])
     compact_kv("Migration", f"{eu['migration_pressure']}/100", VALUE_HELP["Migration"])
-
     with st.expander("Mehr Details (Druckwerte)", expanded=False):
         compact_kv("Disinfo", f"{eu['disinfo_pressure']}/100", VALUE_HELP["Disinfo"])
         compact_kv("TradeWar", f"{eu['trade_war_pressure']}/100", VALUE_HELP["TradeWar"])
-
 
     st.write("---")
 
@@ -769,40 +813,74 @@ with right:
         if not cond_results:
             st.warning("Für dieses Land sind noch keine Siegbedingungen definiert (countries.py: win_conditions).")
         else:
+            prog = _progress_from_conditions(cond_results)
+            st.progress(int(prog))
+            st.caption(f"{prog:.0f}% der Siegbedingungen erfüllt.")
             if is_winner:
                 st.success("✅ Siegbedingungen erfüllt! Du hast gewonnen.")
-            else:
-                st.info("Noch nicht gewonnen — Bedingungen:")
             for r in cond_results:
                 st.write(("✅ " if r.ok else "❌ ") + f"{r.label} (aktuell: {r.current})")
 
-    # Optional: Winners + GM details (kompakt)
-    if evaluate_all_countries is not None:
-        st.write("---")
-        all_metrics_now = load_all_country_metrics(conn, countries)
-        eu_now = get_eu_state(conn)
-        win_eval = evaluate_all_countries(
-            all_country_metrics=all_metrics_now,
-            eu_state=eu_now,
-            country_defs=COUNTRY_DEFS,
-        )
-        winners = [countries_display[c] for c in countries if win_eval.get(c, {}).get("is_winner")]
-        if winners:
-            st.success("🏆 Gewinner erreicht: " + ", ".join(winners))
+# ----------------------------
+# CENTER: Game Over Banner + News + Dashboard + Actions
+# ----------------------------
+with center:
+    if phase == "game_over":
+        if winner_country:
+            st.success(f"🏆 GAME OVER — Gewinner: {countries_display.get(winner_country, winner_country)} (Runde {winner_round})")
         else:
-            st.caption("Noch kein Land hat die Siegbedingungen vollständig erfüllt.")
-        if is_gm:
-            with st.expander("📈 Siegfortschritt (GM Detail)", expanded=False):
-                for c in countries:
-                    st.markdown(f"### {countries_display[c]}")
-                    res = win_eval[c]["results"]
-                    if not res:
-                        st.caption("Keine Bedingungen definiert.")
-                        continue
-                    for r in res:
-                        st.write(("✅ " if r.ok else "❌ ") + f"{r.label} (aktuell: {r.current})")
+            st.success("🏁 GAME OVER")
+        st.balloons()
+        st.write("---")
 
-    # GM controls (kompakt in Expander, damit UI clean bleibt)
+    if panel_country:
+        render_news_panel(
+            conn,
+            round_no=round_no,
+            eu=eu,
+            countries=countries,
+            countries_display=countries_display,
+            my_country=panel_country,
+        )
+        st.write("---")
+
+    with st.expander("📊 Dashboard (öffentlich)", expanded=(phase == "game_over")):
+        render_public_dashboard(conn, countries=countries, countries_display=countries_display)
+
+    st.write("---")
+
+    # Aktionen unter Dashboard/News
+    if is_gm:
+        st.subheader("🎮 Spieleransicht (GM Simulation)")
+        if not is_simulating_player_view or not effective_country:
+            st.info("Aktiviere in der Sidebar 'Spieleransicht simulieren' und wähle ein Land.")
+        else:
+            render_player_view(
+                conn=conn,
+                round_no=round_no,
+                phase=phase,
+                eu=eu,
+                countries_display=countries_display,
+                my_country=effective_country,
+                is_lock_disabled=False,
+            )
+    else:
+        st.subheader("🎮 Aktionen")
+        render_player_view(
+            conn=conn,
+            round_no=round_no,
+            phase=phase,
+            eu=eu,
+            countries_display=countries_display,
+            my_country=effective_country,
+            is_lock_disabled=False,
+        )
+
+# ----------------------------
+# GM controls (kompakt in Sidebar-ähnlichem Bereich rechts? -> bleibt rechts oben)
+# ----------------------------
+# GM controls bleiben in RIGHT-Spalte als Expander (wie vorher), aber wir hängen sie unten an:
+with right:
     if is_gm:
         st.write("---")
         with st.expander("🎛️ Game Master Steuerung (sequenziell)", expanded=False):
@@ -810,6 +888,10 @@ with right:
             have_all_actions = all((c in actions_in_db and len(actions_in_db[c]) == 3) for c in countries)
             have_all_locks = all_locked(conn, round_no, countries)
             have_external = len(get_external_events(conn, round_no)) == 3
+
+            if phase == "game_over":
+                st.warning("Game Over – nur Reset möglich.")
+                st.stop()
 
             # 1) External moves
             external_disabled = (phase == "actions_published")
@@ -891,20 +973,6 @@ with right:
                     set_game_meta(conn, round_no, "actions_generated")
                 st.rerun()
 
-            actions_in_db = get_round_actions(conn, round_no)
-            if actions_in_db:
-                with st.expander("👀 Vorschau: Generierte Länderaktionen (GM)", expanded=False):
-                    for c in countries:
-                        st.markdown(f"### {countries_display[c]}")
-                        a = actions_in_db.get(c, {})
-                        if not a:
-                            st.caption("Noch keine Aktionen generiert.")
-                            continue
-                        st.write(f"**Aggressiv:** {a.get('aggressiv','')}")
-                        st.write(f"**Moderate:** {a.get('moderate','')}")
-                        st.write(f"**Passiv:** {a.get('passiv','')}")
-                        st.write("---")
-
             # 3) Publish
             publish_disabled = not (phase == "actions_generated" and have_all_actions and have_external)
             if st.button("🚦 Runde starten (Optionen veröffentlichen)", disabled=publish_disabled, use_container_width=True):
@@ -962,6 +1030,7 @@ with right:
                         trade_war_pressure=eu_after["trade_war_pressure"],
                     )
 
+                    # Apply deltas + history
                     for c in countries:
                         d = result["länder"][c] or {}
                         apply_country_deltas(conn, c, d)
@@ -978,6 +1047,8 @@ with right:
                         )
 
                     eu_after_fresh = get_eu_state(conn)
+
+                    # Summary
                     summary_text = generate_round_summary(
                         api_key=api_key,
                         model="mistral-small",
@@ -994,55 +1065,57 @@ with right:
                     )
                     upsert_round_summary(conn, round_no, summary_text)
 
+                    # Snapshots + GameOver check
+                    winners: List[str] = []
+                    all_metrics_now = load_all_country_metrics(conn, countries)
+                    eu_now = get_eu_state(conn)
+
+                    if evaluate_all_countries is not None:
+                        win_eval = evaluate_all_countries(
+                            all_country_metrics=all_metrics_now,
+                            eu_state=eu_now,
+                            country_defs=COUNTRY_DEFS,
+                        )
+                        for c in countries:
+                            res = win_eval.get(c, {})
+                            is_winner = bool(res.get("is_winner"))
+                            progress = _progress_from_conditions(res.get("results") or [])
+                            upsert_country_snapshot(
+                                conn,
+                                round_no=round_no,
+                                country=c,
+                                metrics=all_metrics_now[c],
+                                victory_progress=progress,
+                                is_winner=is_winner,
+                            )
+                            if is_winner:
+                                winners.append(c)
+                    else:
+                        # fallback: nur Werte snapshotten ohne progress
+                        for c in countries:
+                            upsert_country_snapshot(
+                                conn,
+                                round_no=round_no,
+                                country=c,
+                                metrics=all_metrics_now[c],
+                                victory_progress=0.0,
+                                is_winner=False,
+                            )
+
+                    # Finish round: Game Over or next round
                     clear_round_data(conn, round_no)
                     clear_external_events(conn, round_no)
-                    set_game_meta(conn, round_no + 1, "setup")
 
-                st.success("Runde aufgelöst, Werte gesetzt, nächste Runde gestartet.")
+                    if winners:
+                        # falls mehrere, nimm den ersten (oder du machst später Co-Winner)
+                        set_game_over(conn, winner_country=winners[0], winner_round=round_no, reason="win_conditions")
+                        # Wichtig: round bleibt auf aktueller Runde (Endzustand)
+                    else:
+                        set_game_meta(conn, round_no + 1, "setup")
+
+                st.success("Runde aufgelöst.")
                 st.rerun()
 
             st.caption("Flow: Außenmächte → Aktionen generieren → Veröffentlichen → Lock → Resolve")
-
-# ----------------------------
-# CENTER: News oben, darunter Aktionen
-# ----------------------------
-with center:
-    if panel_country:
-        render_news_panel(
-            conn,
-            round_no=round_no,
-            eu=eu,
-            countries=countries,
-            countries_display=countries_display,
-            my_country=panel_country,
-        )
-        st.write("---")
-
-    # Aktionen unter News
-    if is_gm:
-        st.subheader("🎮 Spieleransicht (GM Simulation)")
-        if not is_simulating_player_view or not effective_country:
-            st.info("Aktiviere in der Sidebar 'Spieleransicht simulieren' und wähle ein Land.")
-        else:
-            render_player_view(
-                conn=conn,
-                round_no=round_no,
-                phase=phase,
-                eu=eu,
-                countries_display=countries_display,
-                my_country=effective_country,
-                is_lock_disabled=False,
-            )
-    else:
-        st.subheader("🎮 Aktionen")
-        render_player_view(
-            conn=conn,
-            round_no=round_no,
-            phase=phase,
-            eu=eu,
-            countries_display=countries_display,
-            my_country=effective_country,
-            is_lock_disabled=False,
-        )
 
 conn.close()
