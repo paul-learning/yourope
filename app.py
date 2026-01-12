@@ -2,6 +2,8 @@ import os
 import html
 from pathlib import Path
 from typing import Dict, Any, List
+from streamlit_autorefresh import st_autorefresh
+
 
 import streamlit as st
 from dotenv import load_dotenv
@@ -509,6 +511,12 @@ def render_player_view(
         st.success("✅ Eingelockt. (Welche Variante bleibt für andere verborgen.)")
     else:
         st.warning("⏳ Noch nicht eingelockt.")
+    #auto refresh
+    # Beispiel: Auto-refresh nur wenn nichts zu tun ist
+    is_waiting = (phase != "actions_published") or (phase == "actions_published" and my_country in get_locks(conn, round_no))
+
+    if not is_gm and is_waiting and phase != "game_over":
+        st_autorefresh(interval=4000, key="player_wait_refresh")  # 4s
 
     options = {
         "aggressiv": a["aggressiv"],
@@ -703,6 +711,7 @@ with st.sidebar.expander("📊 Rundenstatus", expanded=False):
         else:
             st.warning(f"{name}: ⏳ nicht eingelockt")
 
+
 # ----------------------------
 # GM: User management
 # ----------------------------
@@ -771,6 +780,9 @@ panel_country = effective_country if effective_country else assigned_country
 # ----------------------------
 # RIGHT: Eigene Werte → EU & Druckwerte → Siegfortschritt
 # ----------------------------
+if st.sidebar.button("🔄 Aktualisieren"):
+    st.rerun()
+
 with right:
     my_metrics = None
     if panel_country:
