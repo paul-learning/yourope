@@ -759,3 +759,12 @@ def delete_user(conn: sqlite3.Connection, username: str) -> None:
     cur = conn.cursor()
     cur.execute("DELETE FROM users WHERE username=?", (username.strip(),))
     conn.commit()
+def get_max_snapshot_round(conn: sqlite3.Connection) -> Optional[int]:
+    cur = conn.cursor()
+    cur.execute("SELECT MAX(round) FROM country_snapshots")
+    r = cur.fetchone()[0]
+    return int(r) if r is not None else None
+def clear_country_snapshots(conn: sqlite3.Connection) -> None:
+    cur = conn.cursor()
+    cur.execute("DELETE FROM country_snapshots")
+    conn.commit()

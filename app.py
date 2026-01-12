@@ -3,6 +3,7 @@ import html
 from pathlib import Path
 from typing import Dict, Any, List
 from streamlit_autorefresh import st_autorefresh
+from db import clear_country_snapshots
 
 
 import streamlit as st
@@ -48,6 +49,7 @@ from db import (
     verify_user,
     list_users,
     delete_user,
+    get_max_snapshot_round,
 )
 
 from ai_round import generate_actions_for_country, resolve_round_all_countries, generate_round_summary
@@ -756,6 +758,7 @@ if is_gm:
         clear_round_data(conn, round_no)
         clear_all_round_summaries(conn)
         clear_external_events(conn, round_no)
+        clear_country_snapshots(conn)
         clear_game_over(conn)
         set_eu_state(
             conn,
@@ -1041,6 +1044,40 @@ with right:
                         disinfo_pressure=eu_after["disinfo_pressure"],
                         trade_war_pressure=eu_after["trade_war_pressure"],
                     )
+                    all_metrics_before = load_all_country_metrics(conn, countries)
+                    eu_before_for_progress = get_eu_state(conn)
+                    # --- Baseline snapshots (round_no-1) nur wenn noch nicht vorhanden ---
+                    max_snap = get_max_snapshot_round(conn)
+                    need_baseline = (max_snap is None) and (round_no >= 1)
+
+                    if need_baseline:
+                        if evaluate_all_countries is not None:
+                            win_eval_before = evaluate_all_countries(
+                                all_country_metrics=all_metrics_before,
+                                eu_state=eu_before_for_progress,
+                                country_defs=COUNTRY_DEFS,
+                            )
+                            for c in countries:
+                                res = win_eval_before.get(c, {})
+                                progress_before = _progress_from_conditions(res.get("results") or [])
+                                upsert_country_snapshot(
+                                    conn,
+                                    round_no=round_no - 1,
+                                    country=c,
+                                    metrics=all_metrics_before[c],
+                                    victory_progress=progress_before,
+                                    is_winner=bool(res.get("is_winner")),
+                                )
+                        else:
+                            for c in countries:
+                                upsert_country_snapshot(
+                                    conn,
+                                    round_no=round_no - 1,
+                                    country=c,
+                                    metrics=all_metrics_before[c],
+                                    victory_progress=0.0,
+                                    is_winner=False,
+                                )
 
                     # Apply deltas + history
                     for c in countries:
