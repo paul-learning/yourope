@@ -140,6 +140,29 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
     )
     """)
 
+        # Domestic events (innenpolitische Headlines) per round + country
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS domestic_events (
+        round INTEGER NOT NULL,
+        country TEXT NOT NULL,
+        headline TEXT NOT NULL,
+        details TEXT NOT NULL DEFAULT '',
+        craziness INTEGER NOT NULL DEFAULT 0,
+        created_at INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY (round, country)
+    )
+    """)
+
+    # migrations for older DBs
+    if not _col_exists(conn, "domestic_events", "details"):
+        cur.execute("ALTER TABLE domestic_events ADD COLUMN details TEXT NOT NULL DEFAULT ''")
+    if not _col_exists(conn, "domestic_events", "craziness"):
+        cur.execute("ALTER TABLE domestic_events ADD COLUMN craziness INTEGER NOT NULL DEFAULT 0")
+    if not _col_exists(conn, "domestic_events", "created_at"):
+        # SQLite ALTER TABLE needs constant defaults
+        cur.execute("ALTER TABLE domestic_events ADD COLUMN created_at INTEGER NOT NULL DEFAULT 0")
+
+
     # --- NEW migrations: quote + craziness for external events ---
     if not _col_exists(conn, "external_events", "quote"):
         cur.execute("ALTER TABLE external_events ADD COLUMN quote TEXT NOT NULL DEFAULT ''")
@@ -801,4 +824,60 @@ def get_max_snapshot_round(conn: sqlite3.Connection) -> Optional[int]:
 def clear_country_snapshots(conn: sqlite3.Connection) -> None:
     cur = conn.cursor()
     cur.execute("DELETE FROM country_snapshots")
+    conn.commit()
+
+def clear_domestic_events(conn: sqlite3.Connection, round_no: int) -> None:
+    cur = conn.cursor()
+    cur.execute("DELETE FROM domestic_events WHERE round = ?", (int(round_no),))
+    conn.commit()
+
+
+def upsert_domestic_event(
+    conn: sqlite3.Connection,
+    round_no: int,
+    country: str,
+    headline: str,
+    *,
+    details: str = "",
+    craziness: int = 0,
+) -> None:
+    cur = conn.cursor()
+    cur.execute("""
+        INSERT INTO domestic_events (round, country, headline, details, craziness, created_at)
+        VALUES (?, ?, ?, ?, ?, strftime('%s','now'))
+        ON CONFLICT(round, country) DO UPDATE SET
+            headline = excluded.headline,
+            details = excluded.details,
+            craziness = excluded.craziness,
+            created_at = strftime('%s','now')
+    """, (int(round_no), str(country), str(headline), str(details), int(craziness)))
+    conn.commit()
+
+
+def get_domestic_events(conn: sqlite3.Connection, round_no: int) -> List[Dict[str, Any]]:
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT country, headline, details, craziness, created_at
+        FROM domestic_events
+        WHERE round = ?
+        ORDER BY country ASC
+    """, (int(round_no),))
+    out: List[Dict[str, Any]] = []
+    for country, headline, details, craziness, created_at in cur.fetchall():
+        out.append({
+            "country": str(country),
+            "headline": str(headline),
+            "details": str(details or ""),
+            "craziness": int(craziness or 0),
+            "created_at": int(created_at or 0),
+        })
+    return out
+
+def clear_all_events_and_history(conn: sqlite3.Connection) -> None:
+    cur = conn.cursor()
+    cur.execute("DELETE FROM turn_history")
+    cur.execute("DELETE FROM external_events")
+    cur.execute("DELETE FROM domestic_events")
+    cur.execute("DELETE FROM round_actions")
+    cur.execute("DELETE FROM round_locks")
     conn.commit()

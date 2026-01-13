@@ -248,3 +248,126 @@ Schema:
             m["quote"] = "—"
 
     return obj
+
+def generate_domestic_events(
+    *,
+    api_key: str,
+    model: str,
+    round_no: int,
+    eu_state: Dict[str, Any],
+    countries: List[str],
+    countries_metrics: Dict[str, Dict[str, Any]],
+    recent_round_summaries: List[Tuple[int, str]] | None = None,
+    recent_actions_by_country: Optional[Dict[str, List[str]]] = None,
+    temperature: float = 0.85,
+    top_p: float = 0.95,
+    max_tokens: int = 1400,
+) -> Dict[str, Any]:
+    """
+    Output schema:
+    {
+      "events": {
+        "Germany": {"craziness": 42, "headline": "...", "details": "..."},
+        ...
+      }
+    }
+    """
+    client = Mistral(api_key=api_key)
+
+    memory_str = "Keine."
+    if recent_round_summaries:
+        rev = list(reversed(recent_round_summaries))
+        memory_str = "\n".join([f"- Runde {r}: {s}" for r, s in rev])
+
+    actions_by = recent_actions_by_country or {}
+    actions_lines = []
+    for c in countries:
+        acts = actions_by.get(c, [])[:4]
+        if acts:
+            actions_lines.append(f"- {c}: " + " | ".join(acts))
+    actions_str = "\n".join(actions_lines) if actions_lines else "Keine."
+
+    metrics_lines = []
+    for c in countries:
+        m = countries_metrics.get(c, {})
+        metrics_lines.append(
+            f"- {c}: Mil={m.get('military')}, Sta={m.get('stability')}, Wir={m.get('economy')}, "
+            f"Dip={m.get('diplomatic_influence')}, Zust={m.get('public_approval')}"
+        )
+    metrics_str = "\n".join(metrics_lines)
+
+    schema_hint = """
+{
+  "events": {
+    "Germany": {"craziness": 0, "headline": "...", "details": "..."}
+  }
+}
+""".strip()
+
+    prompt = f"""
+Du bist Nachrichten-Redaktion & Innenpolitik-Simulationsmodul eines EU-Geopolitik-Spiels.
+
+Erzeuge für Runde {round_no} für JEDES Land genau EINE innenpolitische Zeitungsheadline.
+Sprache: Deutsch.
+Headlines kurz (max ~110 Zeichen), details 1–2 Sätze.
+Zusätzlich: "craziness" 0..100 (wie eskalierend/krisenhaft innenpolitisch).
+
+Kontext (EU/Weltlage):
+- EU-Kohäsion: {eu_state["cohesion"]}%
+- Threat={eu_state["threat_level"]}/100, Frontline={eu_state["frontline_pressure"]}/100
+- Energy={eu_state["energy_pressure"]}/100, Migration={eu_state["migration_pressure"]}/100
+- Disinfo={eu_state["disinfo_pressure"]}/100, TradeWar={eu_state["trade_war_pressure"]}/100
+- Globaler Kontext: {eu_state["global_context"]}
+
+Länderwerte:
+{metrics_str}
+
+Letzte Runden (Memory):
+{memory_str}
+
+Letzte Spieleraktionen je Land (für Konsequenzen/Variation):
+{actions_str}
+
+Regeln:
+- Nur gültiges JSON zurückgeben (kein Markdown).
+- Keys in events müssen exakt diese Länder sein: {countries}
+- Kein Fantasy, aber zugespitzt möglich (Terror/Skandale/Inflation/Proteste/Fake News).
+
+Schema:
+{schema_hint}
+""".strip()
+
+    raw = _chat(
+        client,
+        model,
+        messages=[
+            {"role": "system", "content": "Antworte ausschließlich mit gültigem JSON. Kein Markdown."},
+            {"role": "user", "content": prompt},
+        ],
+        temperature=temperature,
+        top_p=top_p,
+        max_tokens=max_tokens,
+    )
+
+    try:
+        obj = parse_json_maybe(raw)
+    except Exception:
+        obj = _repair_to_valid_json(client, model, raw, schema_hint)
+
+    if "events" not in obj or not isinstance(obj["events"], dict):
+        raise ValueError("Domestic events JSON muss 'events' als Objekt enthalten.")
+
+    # ensure all countries exist
+    for c in countries:
+        if c not in obj["events"]:
+            obj["events"][c] = {"craziness": 25, "headline": "Regierung unter Druck – innenpolitische Lage unklar", "details": ""}
+
+    # harden
+    for c in countries:
+        e = obj["events"].get(c, {}) or {}
+        e["headline"] = str(e.get("headline", "")).strip()
+        e["details"] = str(e.get("details", "")).strip()
+        e["craziness"] = int(e.get("craziness", 0) or 0)
+        obj["events"][c] = e
+
+    return obj

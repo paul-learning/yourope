@@ -53,10 +53,16 @@ from db import (
     list_users,
     delete_user,
     get_max_snapshot_round,
+    # domestic
+    clear_domestic_events,
+    upsert_domestic_event,
+    get_domestic_events,
+    clear_all_events_and_history,
 )
 
 from ai_round import generate_actions_for_country, resolve_round_all_countries, generate_round_summary
-from ai_external import generate_external_moves
+from ai_external import generate_external_moves, generate_domestic_events
+
 
 # Optional: win.py (falls vorhanden)
 try:
@@ -214,6 +220,7 @@ def build_action_prompt(
     eu_state: Dict[str, Any],
     external_events: List[Dict[str, Any]],
     recent_actions_summary: str,
+    domestic_headline: str
 ) -> str:
     external_str = format_external_events(external_events)
 
@@ -234,6 +241,10 @@ EU-/Weltlage:
 
 Außenmächte-Moves dieser Runde:
 {external_str}
+
+Innenpolitisches Event (diese Runde):
+- {domestic_headline}
+
 
 Letzte Aktionen (für Variation, nicht wiederholen):
 {recent_actions_summary}
@@ -407,61 +418,21 @@ def render_news_panel(
     else:
         st.caption("Keine Außenmächte-Moves (noch nicht generiert).")
 
-    # --- NEU: Runden-Historie (Außenmächte + Länderaktionen) ---
-    with st.expander("🕰️ Runden-Historie (Außenmächte + Aktionen)", expanded=False):
-        # Welche Runden existieren? (aus turn_history UND external_events)
-        cur = conn.cursor()
-        cur.execute("SELECT DISTINCT round FROM turn_history ORDER BY round DESC")
-        rounds_from_turns = [int(r[0]) for r in cur.fetchall()]
+    # --- Aktuelle Runde: Innenpolitik (NEU) ---
+    dom_now = get_domestic_events(conn, round_no)
+    if dom_now:
+        with st.expander("🏠 Innenpolitik (aktuelle Runde)", expanded=True):
+            for e in dom_now:
+                name = countries_display.get(e["country"], e["country"])
+                c = int(e.get("craziness", 0) or 0)
+                st.markdown(f"**{name}** (🎲 {c}/100): {e['headline']}")
+                if e.get("details"):
+                    st.caption(e["details"])
+    else:
+        st.caption("Keine Innenpolitik-Headlines (noch nicht generiert).")
 
-        cur.execute("SELECT DISTINCT round FROM external_events ORDER BY round DESC")
-        rounds_from_external = [int(r[0]) for r in cur.fetchall()]
 
-        all_rounds = sorted(set(rounds_from_turns + rounds_from_external), reverse=True)
-
-        if not all_rounds:
-            st.caption("Noch keine Historie vorhanden.")
-        else:
-            # Optional: kompakt zuerst die neueste Runde anzeigen
-            for r in all_rounds:
-                with st.expander(f"Runde {r}", expanded=(r == all_rounds[0])):
-                    # 1) Außenmächte dieser Runde
-                    ext_events_r = get_external_events(conn, r)
-                    if ext_events_r:
-                        st.markdown("**🌐 Außenmächte**")
-                        for e in ext_events_r:
-                            c = int(e.get("craziness", 0) or 0)
-                            st.markdown(f"- **{e['actor']}** (🎲 {c}/100): {e['headline']}")
-                            q = (e.get("quote") or "").strip()
-                            if q and q != "—":
-                                st.caption(f"🗣️ {q}")
-                    else:
-                        st.caption("Keine Außenmächte-Moves für diese Runde.")
-
-                    st.write("---")
-
-                    # 2) Aktionen der Länder dieser Runde (aus turn_history)
-                    st.markdown("**🏛️ Länderaktionen**")
-                    cur.execute(
-                        """
-                        SELECT country, action_public, global_context
-                        FROM turn_history
-                        WHERE round = ?
-                        ORDER BY country ASC
-                        """,
-                        (int(r),),
-                    )
-                    rows = cur.fetchall()
-                    if not rows:
-                        st.caption("Keine Länderaktionen gespeichert (evtl. Runde noch nicht resolved).")
-                    else:
-                        for country, action_public, global_context in rows:
-                            name = countries_display.get(country, country)
-                            st.markdown(f"**{name}**")
-                            st.write(action_public)
-                            if global_context:
-                                st.caption(f"Kontext: {global_context}")
-
+   
     # --- (Optional) Deine alte "Letzte Runde — Aktionen anderer Länder" Sektion kannst du entfernen,
     #     weil die Historie das jetzt besser abdeckt.
     #     Wenn du sie behalten willst: ergänze hier nur die Außenmächte der letzten Runde, aber ist redundant. ---
@@ -810,11 +781,12 @@ if is_gm:
     st.sidebar.subheader("Reset")
     if st.sidebar.button("💣 Reset alle"):
         reset_all_countries(conn, COUNTRY_DEFS)
-        clear_round_data(conn, round_no)
         clear_all_round_summaries(conn)
-        clear_external_events(conn, round_no)
         clear_country_snapshots(conn)
         clear_game_over(conn)
+
+        clear_all_events_and_history(conn)  # <-- neu, statt loop
+
         set_eu_state(
             conn,
             cohesion=EU_DEFAULT.get("cohesion", 75),
@@ -828,6 +800,7 @@ if is_gm:
         )
         set_game_meta(conn, 1, "setup")
         st.rerun()
+
 
 # ----------------------------
 # Layout: Center + Right
@@ -913,6 +886,65 @@ with center:
             my_country=panel_country,
         )
         st.write("---")
+     # --- NEU: Runden-Historie (Außenmächte + Länderaktionen) ---
+    with st.expander("🕰️ Runden-Historie (Außenmächte + Innenpolitik + Aktionen)", expanded=False):
+        # Welche Runden existieren? (aus turn_history UND external_events)
+        cur = conn.cursor()
+        cur.execute("SELECT DISTINCT round FROM turn_history ORDER BY round DESC")
+        rounds_from_turns = [int(r[0]) for r in cur.fetchall()]
+
+        cur.execute("SELECT DISTINCT round FROM external_events ORDER BY round DESC")
+        rounds_from_external = [int(r[0]) for r in cur.fetchall()]
+
+        cur.execute("SELECT DISTINCT round FROM domestic_events ORDER BY round DESC")
+        rounds_from_domestic = [int(r[0]) for r in cur.fetchall()]
+
+        all_rounds = sorted(set(rounds_from_turns + rounds_from_external + rounds_from_domestic), reverse=True)
+
+
+        if not all_rounds:
+            st.caption("Noch keine Historie vorhanden.")
+        else:
+            # Optional: kompakt zuerst die neueste Runde anzeigen
+            for r in all_rounds:
+                with st.expander(f"Runde {r}", expanded=(r == all_rounds[0])):
+                    # 1) Außenmächte dieser Runde
+                    ext_events_r = get_external_events(conn, r)
+                    if ext_events_r:
+                        st.markdown("**🌐 Außenmächte**")
+                        for e in ext_events_r:
+                            c = int(e.get("craziness", 0) or 0)
+                            st.markdown(f"- **{e['actor']}** (🎲 {c}/100): {e['headline']}")
+                            q = (e.get("quote") or "").strip()
+                            if q and q != "—":
+                                st.caption(f"🗣️ {q}")
+                    else:
+                        st.caption("Keine Außenmächte-Moves für diese Runde.")
+
+                    st.write("---")
+
+                    # 2) Aktionen der Länder dieser Runde (aus turn_history)
+                    st.markdown("**🏛️ Länderaktionen**")
+                    cur.execute(
+                        """
+                        SELECT country, action_public, global_context
+                        FROM turn_history
+                        WHERE round = ?
+                        ORDER BY country ASC
+                        """,
+                        (int(r),),
+                    )
+                    rows = cur.fetchall()
+                    if not rows:
+                        st.caption("Keine Länderaktionen gespeichert (evtl. Runde noch nicht resolved).")
+                    else:
+                        for country, action_public, global_context in rows:
+                            name = countries_display.get(country, country)
+                            st.markdown(f"**{name}**")
+                            st.write(action_public)
+                            if global_context:
+                                st.caption(f"Kontext: {global_context}")
+    
 
     with st.expander("📊 Dashboard (öffentlich)", expanded=(phase == "game_over")):
         render_public_dashboard(conn, countries=countries, countries_display=countries_display)
@@ -964,7 +996,7 @@ with right:
             # 1) External moves
             external_disabled = (phase == "actions_published")
             if st.button(
-                "⚠️ Außenmächte-Züge generieren (USA/China/Russland)",
+                "⚠️ Außenmächte-Moves und Innenpolitik-Headlines generieren",
                 disabled=external_disabled,
                 use_container_width=True,
             ):
@@ -1020,6 +1052,41 @@ with right:
                         disinfo_pressure=eu_after["disinfo_pressure"],
                         trade_war_pressure=eu_after["trade_war_pressure"],
                     )
+                                    # --- NEU: Domestic headlines generieren & speichern ---
+                    clear_domestic_events(conn, round_no)
+
+                    all_metrics = load_all_country_metrics(conn, countries)
+
+                    # recent actions je Land aus turn_history (kurz)
+                    recent_actions_by_country = {}
+                    for c in countries:
+                        recent = load_recent_history(conn, c, limit=6)
+                        recent_actions_by_country[c] = [r[1] for r in recent if r and r[1]]
+
+                    dom_obj = generate_domestic_events(
+                        api_key=api_key,
+                        model="mistral-small",
+                        round_no=round_no,
+                        eu_state=eu_after,  # nutze updated EU state nach external modifiers
+                        countries=countries,
+                        countries_metrics=all_metrics,
+                        recent_round_summaries=recent_summaries,
+                        recent_actions_by_country=recent_actions_by_country,
+                        temperature=0.85,
+                        top_p=0.95,
+                        max_tokens=1400,
+                    )
+
+                    for c in countries:
+                        e = (dom_obj.get("events", {}) or {}).get(c, {}) or {}
+                        upsert_domestic_event(
+                            conn,
+                            round_no,
+                            c,
+                            e.get("headline", ""),
+                            details=e.get("details", ""),
+                            craziness=int(e.get("craziness", 0) or 0),
+                        )
 
                     set_game_meta(conn, round_no, "external_generated")
                 st.rerun()
@@ -1032,17 +1099,20 @@ with right:
                     ext_now = get_external_events(conn, round_no)
 
                     all_metrics = load_all_country_metrics(conn, countries)
+                    dom_map = {e["country"]: e for e in get_domestic_events(conn, round_no)}
                     for c in countries:
                         m = all_metrics[c]
                         recent = load_recent_history(conn, c, limit=12)
-
+                        domestic_headline = (dom_map.get(c, {}) or {}).get("headline", "Keine auffälligen Ereignisse gemeldet.")
                         prompt = build_action_prompt(
                             country_display=countries_display[c],
                             metrics=m,
                             eu_state=eu_now,
                             external_events=ext_now,
                             recent_actions_summary=summarize_recent_actions(recent),
+                            domestic_headline=domestic_headline,
                         )
+
                         actions_obj, _raw_first, _used_repair = generate_actions_for_country(
                             api_key=api_key,
                             model="mistral-small",
@@ -1069,7 +1139,7 @@ with right:
                     recent_summaries = get_recent_round_summaries(conn, limit=3)
                     eu_before = get_eu_state(conn)
                     ext_now = get_external_events(conn, round_no)
-
+                    dom_now = get_domestic_events(conn, round_no)
                     actions_texts = get_round_actions(conn, round_no)
                     locks_now = get_locks(conn, round_no)
                     all_metrics = load_all_country_metrics(conn, countries)
@@ -1091,6 +1161,7 @@ with right:
                         locked_choices=locks_now,
                         recent_round_summaries=recent_summaries,
                         external_events=ext_now,
+                        domestic_events=dom_now,
                         temperature=0.6,
                         top_p=0.95,
                         max_tokens=1700,
@@ -1172,6 +1243,7 @@ with right:
                         eu_before=eu_before,
                         eu_after=eu_after_fresh,
                         external_events=ext_now,
+                        domestic_events=dom_now,
                         chosen_actions_str=chosen_actions_str,
                         result_obj=result,
                         temperature=0.4,

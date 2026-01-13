@@ -116,6 +116,7 @@ def resolve_round_all_countries(
     locked_choices: Dict[str, str],
     recent_round_summaries: List[Tuple[int, str]] | None = None,
     external_events: List[Dict[str, Any]] | None = None,
+    domestic_events: List[Dict[str, Any]] | None = None,
     temperature: float = 0.6,
     top_p: float = 0.95,
     max_tokens: int = 1700,
@@ -150,6 +151,12 @@ def resolve_round_all_countries(
             mods = e.get("modifiers", {})
             lines.append(f"- {e.get('actor')}: {e.get('headline')} | mods={mods}")
         external_str = "\n".join(lines)
+        domestic_str = "Keine."
+        if domestic_events:
+            lines = []
+            for e in domestic_events:
+                lines.append(f"- {e.get('country')}: {e.get('headline')} (crazy={e.get('craziness',0)}/100)")
+            domestic_str = "\n".join(lines)
 
     schema_hint = """
 {
@@ -178,6 +185,10 @@ Story-/Memory-Kontext (letzte Runden):
 
 Außenmächte-Moves dieser Runde (USA/China/Russia):
 {external_str}
+
+Innenpolitische Headlines dieser Runde:
+{domestic_str}
+
 
 Aktueller EU-Status:
 - Kohäsion={eu_state["cohesion"]}%
@@ -241,6 +252,7 @@ def generate_round_summary(
     eu_before: Dict[str, Any],
     eu_after: Dict[str, Any],
     external_events: List[Dict[str, Any]] | None,
+    domestic_events: List[Dict[str, Any]] | None,
     chosen_actions_str: str,
     result_obj: Dict[str, Any],
     temperature: float = 0.4,
@@ -261,6 +273,13 @@ def generate_round_summary(
             lines.append(f"- {e.get('actor')}: {e.get('headline')}")
         external_str = "\n".join(lines)
 
+    domestic_str = "Keine."
+    if domestic_events:
+        lines = []
+        for e in domestic_events:
+            lines.append(f"- {e.get('country')}: {e.get('headline')} (crazy={e.get('craziness',0)}/100)")
+        domestic_str = "\n".join(lines)
+
     schema_hint = """{ "summary": "..." }"""
 
     prompt = f"""
@@ -273,6 +292,9 @@ Inputs:
 
 - Außenmächte-Moves:
 {external_str}
+
+- Innenpolitische Headlines dieser Runde:
+{domestic_str}
 
 - EU vorher: Kohäsion={eu_before["cohesion"]}%, Threat={eu_before["threat_level"]}, Frontline={eu_before["frontline_pressure"]},
   Energy={eu_before["energy_pressure"]}, Migration={eu_before["migration_pressure"]}, Disinfo={eu_before["disinfo_pressure"]}, TradeWar={eu_before["trade_war_pressure"]}
