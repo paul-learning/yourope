@@ -75,7 +75,7 @@ except Exception:
 # ----------------------------
 # Streamlit config
 # ----------------------------
-st.set_page_config(page_title="eugenia", layout="wide")
+st.set_page_config(page_title="yourope", layout="wide")
 
 
 # ----------------------------
@@ -595,7 +595,7 @@ Kontext: {r[7]}
 # ----------------------------
 # App start
 # ----------------------------
-st.title("eugenia - save europe, save yourself")
+st.title("yourope - save europe, save yourself")
 
 load_env()
 
