@@ -353,7 +353,7 @@ with right:
 
     st.write("---")
 
-    st.subheader("🇪🇺 EU & Druckwerte")
+    st.subheader("EU & Druckwerte")
     metric_with_info("EU Kohäsion", f"{eu['cohesion']}%", VALUE_HELP["EU Kohäsion"])
 
     compact_kv("Threat", f"{eu['threat_level']}/100", VALUE_HELP["Threat"])
