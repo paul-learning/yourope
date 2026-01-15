@@ -2,6 +2,8 @@ import random
 from typing import Dict, Any, List, Callable
 
 import streamlit as st
+import copy
+
 
 from db import (
     get_external_events,
@@ -32,6 +34,46 @@ from db import (
 from ai_external import generate_external_moves, generate_domestic_events
 
 from ai_round import resolve_round_all_countries, generate_round_summary
+
+def _auto_modifiers_from_craziness(actor: str, craziness: int) -> Dict[str, int]:
+    """
+    Simple mapping: craziness (0..100) -> pressure deltas.
+    Deterministic + readable. Feel free to tweak weights later.
+    """
+    c = max(0, min(100, int(craziness)))
+    # scale to roughly -8..+10 range
+    s = round((c - 50) / 10)  # -5..+5 approx
+
+    if actor == "Russia":
+        return {
+            "eu_cohesion_delta": -max(0, s),          # more chaos -> cohesion down
+            "threat_delta": max(0, s + 1),            # tends to raise threat
+            "frontline_delta": max(0, s),
+            "energy_delta": max(0, s),                # gas / energy leverage
+            "migration_delta": max(0, s - 1),
+            "disinfo_delta": max(0, s + 1),
+            "trade_war_delta": max(0, s - 1),
+        }
+    if actor == "China":
+        return {
+            "eu_cohesion_delta": -max(0, s - 1),
+            "threat_delta": max(0, s - 1),
+            "frontline_delta": max(0, s - 2),
+            "energy_delta": max(0, s - 1),
+            "migration_delta": max(0, s - 2),
+            "disinfo_delta": max(0, s),
+            "trade_war_delta": max(0, s + 1),         # trade pressure
+        }
+    # USA default
+    return {
+        "eu_cohesion_delta": -max(0, s - 2),          # usually less direct harm
+        "threat_delta": max(0, s - 1),
+        "frontline_delta": max(0, s - 1),
+        "energy_delta": max(0, s - 2),
+        "migration_delta": max(0, s - 2),
+        "disinfo_delta": max(0, s - 2),
+        "trade_war_delta": max(0, s),                 # tariffs / industrial policy
+    }
 
 
 def render_gm_controls(
@@ -187,60 +229,17 @@ def render_gm_controls(
                         disabled=inputs_disabled,
                     )
 
-                    mods = e.get("modifiers", {}) or {}
-                    cols = st.columns(3)
-                    eu_coh = cols[0].number_input(
-                        "EU Kohäsion Δ",
-                        value=int(mods.get("eu_cohesion_delta", 0) or 0),
-                        step=1,
-                        disabled=inputs_disabled,
-                        key=f"gm_mod_eu_coh_{round_no}_{a}",
-                    )
-                    threat = cols[1].number_input(
-                        "Threat Δ",
-                        value=int(mods.get("threat_delta", 0) or 0),
-                        step=1,
-                        disabled=inputs_disabled,
-                        key=f"gm_mod_threat_{round_no}_{a}",
-                    )
-                    front = cols[2].number_input(
-                        "Frontline Δ",
-                        value=int(mods.get("frontline_delta", 0) or 0),
-                        step=1,
-                        disabled=inputs_disabled,
-                        key=f"gm_mod_front_{round_no}_{a}",
-                    )
+                    mods = _auto_modifiers_from_craziness(a, int(craziness))
 
-                    cols = st.columns(3)
-                    energy = cols[0].number_input(
-                        "Energy Δ",
-                        value=int(mods.get("energy_delta", 0) or 0),
-                        step=1,
-                        disabled=inputs_disabled,
-                        key=f"gm_mod_energy_{round_no}_{a}",
-                    )
-                    migr = cols[1].number_input(
-                        "Migration Δ",
-                        value=int(mods.get("migration_delta", 0) or 0),
-                        step=1,
-                        disabled=inputs_disabled,
-                        key=f"gm_mod_migr_{round_no}_{a}",
-                    )
-                    disinfo = cols[2].number_input(
-                        "Disinfo Δ",
-                        value=int(mods.get("disinfo_delta", 0) or 0),
-                        step=1,
-                        disabled=inputs_disabled,
-                        key=f"gm_mod_disinfo_{round_no}_{a}",
-                    )
+                    # Preview of derived modifiers (read-only)
+                    with st.expander("🔎 Preview: Auswirkung (auto)", expanded=False):
+                        st.caption(
+                            f"EU Kohäsion Δ {mods['eu_cohesion_delta']} | "
+                            f"Threat Δ {mods['threat_delta']} | Frontline Δ {mods['frontline_delta']} | "
+                            f"Energy Δ {mods['energy_delta']} | Migration Δ {mods['migration_delta']} | "
+                            f"Disinfo Δ {mods['disinfo_delta']} | TradeWar Δ {mods['trade_war_delta']}"
+                        )
 
-                    trade = st.number_input(
-                        "TradeWar Δ",
-                        value=int(mods.get("trade_war_delta", 0) or 0),
-                        step=1,
-                        disabled=inputs_disabled,
-                        key=f"gm_mod_trade_{round_no}_{a}",
-                    )
 
                     moves.append(
                         {
@@ -248,17 +247,11 @@ def render_gm_controls(
                             "headline": headline,
                             "quote": quote,
                             "craziness": int(craziness),
-                            "modifiers": {
-                                "eu_cohesion_delta": int(eu_coh),
-                                "threat_delta": int(threat),
-                                "frontline_delta": int(front),
-                                "energy_delta": int(energy),
-                                "migration_delta": int(migr),
-                                "disinfo_delta": int(disinfo),
-                                "trade_war_delta": int(trade),
-                            },
+                            "modifiers": mods,
                         }
                     )
+                    st.write("---")
+
 
             st.write("---")
             st.caption("Innenpolitik: pro Land eine Headline (optional Details + Craziness).")
@@ -278,6 +271,13 @@ def render_gm_controls(
                 value=str(eu_before.get("global_context", "")),
                 disabled=inputs_disabled,
             )
+            with st.expander("🧮 Gesamt-Preview: EU-Druckwerte nach Außenmächten", expanded=False):
+                eu_preview = apply_external_modifiers_to_eu(eu_before, {"moves": moves, "global_context": global_context})
+                st.caption(f"Vorher: Kohäsion {eu_before['cohesion']} | Threat {eu_before['threat_level']} | Frontline {eu_before['frontline_pressure']} | "
+                        f"Energy {eu_before['energy_pressure']} | Migration {eu_before['migration_pressure']} | Disinfo {eu_before['disinfo_pressure']} | TradeWar {eu_before['trade_war_pressure']}")
+                st.caption(f"Nachher: Kohäsion {eu_preview['cohesion']} | Threat {eu_preview['threat_level']} | Frontline {eu_preview['frontline_pressure']} | "
+                        f"Energy {eu_preview['energy_pressure']} | Migration {eu_preview['migration_pressure']} | Disinfo {eu_preview['disinfo_pressure']} | TradeWar {eu_preview['trade_war_pressure']}")
+
 
             saved = st.form_submit_button("💾 Speichern (GM Inputs)", disabled=inputs_disabled, use_container_width=True)
 
