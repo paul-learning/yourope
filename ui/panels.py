@@ -17,8 +17,9 @@ from db import (
     get_locks,
     get_country_snapshots,
 )
-
-
+from countries import (
+    COUNTRY_DEFS,
+)
 # Optional: win.py (falls vorhanden)
 try:
     from win import evaluate_country_win_conditions
@@ -60,7 +61,7 @@ def render_news_panel(
     my_country: str,
 ) -> None:
     st.subheader("🗞️ News")
-
+    st.write("Hallo " + COUNTRY_DEFS[my_country]["Leader"] + "!"),
     if eu.get("global_context"):
         st.info(eu["global_context"])
 

@@ -15,6 +15,7 @@ COUNTRY_DEFS = {
             {"metric": "diplomatic_influence", "op": ">=", "value": 88, "label": "Führende diplomatische Rolle (≥ 88)"},
             {"metric": "eu_cohesion", "op": ">=", "value": 80, "label": "EU-Kohäsion stabil (≥ 80)"},
         ],
+        "Leader": "Friedrich",
     },
     "Italy": {
         "display_name": "Italien",
@@ -30,6 +31,7 @@ COUNTRY_DEFS = {
             {"metric": "public_approval", "op": ">=", "value": 65, "label": "Öffentliche Zustimmung gesichert (≥ 65)"},
             {"metric": "eu_cohesion", "op": ">=", "value": 60, "label": "EU-Unterstützung vorhanden (≥ 60)"},
         ],
+        "Leader": "Giorgia",
     },
     "France": {
         "display_name": "Frankreich",
@@ -45,6 +47,7 @@ COUNTRY_DEFS = {
             {"metric": "stability", "op": ">=", "value": 78, "label": "Ausreichende innenpolitische Stabilität (≥ 78)"},
             {"metric": "eu_cohesion", "op": ">=", "value": 75, "label": "EU handlungsfähig (≥ 75)"},
         ],
+        "Leader": "Emmanuel",
     },
     "Poland": {
         "display_name": "Polen",
@@ -60,6 +63,7 @@ COUNTRY_DEFS = {
             {"metric": "stability", "op": ">=", "value": 75, "label": "Innenpolitisch stabil (≥ 75)"},
             {"metric": "eu_cohesion", "op": ">=", "value": 70, "label": "EU ausreichend geschlossen (≥ 70)"},
         ],
+        "Leader": "Donald",
     },
     "Hungary": {
         "display_name": "Ungarn",
@@ -75,6 +79,7 @@ COUNTRY_DEFS = {
             {"metric": "economy", "op": ">=", "value": 65, "label": "Ausreichende wirtschaftliche Lage (≥ 65)"},
             {"metric": "eu_cohesion", "op": "<=", "value": 45, "label": "Begrenzter EU-Zusammenhalt (≤ 45)"},
         ],
+        "Leader": "Viktor",
     },
 }
 
