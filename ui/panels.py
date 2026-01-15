@@ -1,3 +1,4 @@
+from cmath import phase
 import html
 from typing import Dict, Any, List, Optional, Tuple
 
@@ -532,7 +533,10 @@ def render_player_view(
 
     if phase != "actions_published":
         st.info("Spielerphase noch nicht aktiv. Warte auf den Game Master.")
+        if not is_gm and phase != "game_over":
+            st.autorefresh(interval=8000, key=f"player_poll_{round_no}_{my_country}")
         return
+
 
     locks = get_policy_locks(conn, round_no=round_no)
     my_locks = locks.get(my_country) or {}
