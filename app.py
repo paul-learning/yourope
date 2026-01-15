@@ -55,6 +55,8 @@ from db import (
     get_recent_round_summaries,
     upsert_round_summary,
     clear_all_round_summaries,
+    get_policy_locks,
+    all_policies_locked,
     # snapshots/dashboard
     upsert_country_snapshot,
     get_country_snapshots,
@@ -241,17 +243,27 @@ with st.sidebar.expander("📊 Rundenstatus", expanded=False):
     if phase == "game_over" and winner_country:
         st.success(f"🏆 Gewinner: {countries_display.get(winner_country, winner_country)} (R{winner_round})")
 
-    locks = get_locks(conn, round_no)
+    locks = get_policy_locks(conn, round_no=round_no)
     st.write("**Lock-Status (diese Runde)**")
     for c in countries:
         name = countries_display[c]
-        if c in locks:
+        lc = locks.get(c) or {}
+        f = lc.get("foreign")
+        d = lc.get("domestic")
+
+        if f and d:
             if is_gm:
-                st.success(f"{name}: ✅ eingelockt ({locks[c]})")
+                st.success(f"{name}: ✅ eingelockt (Außen: {f} | Innen: {d})")
             else:
                 st.success(f"{name}: ✅ eingelockt")
+        elif f or d:
+            if is_gm:
+                st.warning(f"{name}: ⏳ teilweise (Außen: {f or '—'} | Innen: {d or '—'})")
+            else:
+                st.warning(f"{name}: ⏳ teilweise eingelockt")
         else:
             st.warning(f"{name}: ⏳ nicht eingelockt")
+
 
 
 # ----------------------------
@@ -479,6 +491,7 @@ with center:
                 my_country=effective_country,
                 is_lock_disabled=False,
                 is_gm=is_gm,
+                api_key=api_key,
             )
     else:
         st.subheader("🎮 Aktionen")
@@ -491,6 +504,7 @@ with center:
             my_country=effective_country,
             is_lock_disabled=False,
             is_gm=is_gm,
+            api_key=api_key,
         )
 
 # ----------------------------
@@ -508,8 +522,6 @@ with right:
             countries_display=countries_display,
             country_defs=COUNTRY_DEFS,
             external_crazy_baseline_ranges=EXTERNAL_CRAZY_BASELINE_RANGES,
-            build_action_prompt=build_action_prompt,
-            summarize_recent_actions=summarize_recent_actions,
             apply_external_modifiers_to_eu=apply_external_modifiers_to_eu,
             decay_pressures=decay_pressures,
             progress_from_conditions=_progress_from_conditions,
