@@ -82,8 +82,8 @@ EU_DEFAULT = {
     "cohesion": 75,
     "global_context": (
         "Russland droht mit Gaskürzungen und eskaliert den Krieg in der Ukraine weiter. "
-        "USA drohen mit Übernahme Grönlands. "
-        "China liebäugelt mit Invasion Taiwans."
+        "USA drohen mit Übernahme Grönlands. Liebäugeln aber auch mit Übernahme Kubas, Kanadas und Mexikos. "
+        "China liebäugelt mit Invasion Taiwans, hält jedem Despoten die Stange und verurteilt USA Venezuela-Intervention sehr scharf."
     ),
 }
 
@@ -109,7 +109,7 @@ EXTERNAL_LEADER_STYLE = {
 
 # Baseline-Tendenzen (du kannst die ranges jederzeit tweaken)
 EXTERNAL_CRAZY_BASELINE_RANGES = {
-    "USA": (30, 90),
-    "Russia": (20, 85),
-    "China": (15, 80),
+    "USA": (20, 100),
+    "Russia": (20, 100),
+    "China": (20, 100),
 }
